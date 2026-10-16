@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/icon.svg">
+<title>Inkcast</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="view">
+<main id="stage"></main>
+
+<section id="pair" hidden>
+  <div class="card">
+    <h1>Inkcast</h1>
+    <p>On your iPad, scan this or open the link in Safari. Both devices need to be on the same Wi-Fi.</p>
+    <img id="qr" alt="QR code for the iPad link">
+    <code id="url"></code>
+    <p class="small">Press <kbd>Q</kbd> to show or hide this. Drop a PDF here to write on it.</p>
+  </div>
+</section>
+
+<nav id="controls">
+  <span id="status"></span>
+  <button id="b-prev" title="Previous page (←)">‹</button>
+  <span id="pageno"></span>
+  <button id="b-next" title="Next page (→)">›</button>
+  <button id="b-qr" title="Pair an iPad (Q)">Pair</button>
+  <button id="b-pdf" title="Open a PDF (O)">PDF</button>
+  <button id="b-export" title="Save notebook as PDF (S)">Save</button>
+  <button id="b-full" title="Full screen (F)">⛶</button>
+</nav>
+<input type="file" id="file" accept="application/pdf,.pdf" hidden>
+<div id="drop" hidden>Drop the PDF to open it</div>
+<div id="toast" hidden></div>
+
+<script type="module" src="/view.js"></script>
+</body>
+</html>
