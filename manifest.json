@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.0w3n-n.inkcast",
+  "name": "Inkcast",
+  "version": "0.2.0",
+  "author": "0w3n-N",
+  "license": "MIT",
+  "description": "Write on your iPad with Apple Pencil and show it live in a screen-shareable window, or mirror the whole iPad over AirPlay. Local network only, no accounts.",
+  "homepage": "https://github.com/0w3n-N/inkcast",
+  "repository": "https://github.com/0w3n-N/inkcast",
+  "keywords": [
+    "ipad",
+    "apple pencil",
+    "whiteboard",
+    "airplay",
+    "screen share",
+    "education"
+  ],
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Inkcast",
+    "description": "Start the Apple Pencil whiteboard, pair an iPad with a QR code, open the share window, and toggle AirPlay mirroring.",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "port": 8770,
+      "airplayName": "Omarchy",
+      "airplayAudio": "on"
+    },
+    "schema": [
+      {
+        "key": "port",
+        "type": "integer",
+        "label": "Whiteboard port",
+        "min": 1024,
+        "max": 65535,
+        "step": 1,
+        "defaultValue": 8770
+      },
+      {
+        "key": "airplayName",
+        "type": "string",
+        "label": "AirPlay name shown on the iPad",
+        "defaultValue": "Omarchy"
+      },
+      {
+        "key": "airplayAudio",
+        "type": "enum",
+        "label": "Play iPad audio while mirroring",
+        "options": [
+          {
+            "value": "on",
+            "label": "On"
+          },
+          {
+            "value": "off",
+            "label": "Off"
+          }
+        ],
+        "defaultValue": "on"
+      }
+    ]
+  }
+}

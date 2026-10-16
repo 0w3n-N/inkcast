@@ -1,0 +1,45 @@
+#!/bin/bash
+# Undo scripts/setup. Asks before removing firewall rules or your notebook.
+# Remove the bar plugin itself with: omarchy plugin remove io.github.0w3n-n.inkcast
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/inkcast"
+APP_DIR="$HOME/.local/share/applications"
+
+ask() {
+  local reply
+  read -r -p "$1 [y/N] " reply </dev/tty || reply=""
+  [[ $reply =~ ^[Yy] ]]
+}
+
+"$ROOT/bin/inkcast" stop >/dev/null 2>&1 || true
+
+# Only remove the command if it is our symlink.
+link="$HOME/.local/bin/inkcast"
+if [[ -L $link && "$(readlink "$link")" == */bin/inkcast ]]; then
+  rm -f "$link"
+  echo "Removed $link"
+fi
+
+for f in "$APP_DIR/inkcast.desktop" "$APP_DIR/inkcast-mirror.desktop"; do
+  [[ -f $f ]] && grep -q 'inkcast' "$f" && rm -f "$f" && echo "Removed $f"
+done
+rm -f "$APP_DIR/icons/Inkcast.png"
+
+if command -v ufw >/dev/null 2>&1 && ask "Remove the firewall rules Inkcast added (needs sudo)?"; then
+  # Delete numbered rules tagged "inkcast", highest number first.
+  sudo ufw status numbered | grep '# inkcast$' | sed -E 's/^\[ *([0-9]+)\].*/\1/' | sort -rn |
+    while read -r n; do sudo ufw --force delete "$n" >/dev/null; done
+  sudo ufw reload >/dev/null
+  rm -f "$DATA_DIR/firewall"
+  echo "Firewall rules removed."
+fi
+
+if [[ -d $DATA_DIR ]] && ask "Delete your saved notebook and pairing key in $DATA_DIR?"; then
+  rm -rf -- "$DATA_DIR"
+  echo "Deleted $DATA_DIR"
+fi
+
+echo "Done. UxPlay, poppler and qrencode were left installed."

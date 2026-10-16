@@ -1,0 +1,182 @@
+#!/bin/bash
+# Inkcast setup. Every step explains itself and asks first; nothing changes
+# unless you answer yes. Safe to run again at any time.
+#
+#   1. Install helpers: poppler (PDFs) and qrencode (pairing QR code)
+#   2. Optional AirPlay mirroring: UxPlay (AUR) and avahi-daemon (discovery)
+#   3. Open the firewall (ufw) for private home/office networks only
+#   4. Optional: an `inkcast` command and app-launcher entries
+#
+# Only steps 1-3 use sudo, and only for pacman/yay, `ufw allow`, and
+# `systemctl enable avahi-daemon`. Undo with scripts/uninstall.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PORT="${INKCAST_PORT:-8770}"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/inkcast"
+BIN_DIR="$HOME/.local/bin"
+APP_DIR="$HOME/.local/share/applications"
+UFW_COMMENT="inkcast"
+PRIVATE_CIDRS=(10.0.0.0/8 172.16.0.0/12 192.168.0.0/16)
+# UxPlay is started with -p: TCP 7000 7001 7100, UDP 6000 6001 7011; mDNS is UDP 5353.
+MIRROR_TCP=(7000 7001 7100)
+MIRROR_UDP=(5353 6000 6001 7011)
+
+bold() { printf '\n\033[1m%s\033[0m\n' "$*"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ask() {
+  local prompt="$1" default="${2:-y}" hint="[Y/n]" reply
+  [[ $default == n ]] && hint="[y/N]"
+  read -r -p "$prompt $hint " reply </dev/tty || reply=""
+  reply="${reply:-$default}"
+  [[ $reply =~ ^[Yy] ]]
+}
+
+if ! [[ $PORT =~ ^[0-9]+$ ]] || ((PORT < 1024 || PORT > 65535)); then
+  echo "INKCAST_PORT must be a number between 1024 and 65535" >&2
+  exit 1
+fi
+
+echo "Inkcast setup. Each step asks before changing anything."
+
+# --------------------------------------------------------------------- macOS
+
+if [[ "$(uname)" == "Darwin" ]]; then
+  bold "macOS"
+  have pdftoppm && have qrencode || echo "For PDFs and the pairing QR code, run: brew install poppler qrencode"
+  echo "For screen mirroring, use the built-in AirPlay Receiver:"
+  echo "System Settings > General > AirDrop & Handoff > AirPlay Receiver."
+  if ask "Add the 'inkcast' command to $BIN_DIR?"; then
+    mkdir -p "$BIN_DIR"
+    ln -sfn "$ROOT/bin/inkcast" "$BIN_DIR/inkcast"
+    echo "Done. Run: inkcast"
+  fi
+  exit 0
+fi
+
+# --------------------------------------------------------------------- 1. helpers
+
+install_pkgs() {
+  if have omarchy; then
+    omarchy pkg add "$@"
+  else
+    sudo pacman -S --needed "$@"
+  fi
+}
+
+missing=()
+have pdftoppm && have pdfinfo || missing+=(poppler)
+have qrencode || missing+=(qrencode)
+bold "1. Helpers"
+if ((${#missing[@]})); then
+  echo "Missing: ${missing[*]} (poppler opens PDFs, qrencode draws the pairing QR code)."
+  if ask "Install ${missing[*]} from the Arch repositories?"; then
+    install_pkgs "${missing[@]}"
+  fi
+else
+  echo "poppler and qrencode are installed."
+fi
+
+# --------------------------------------------------------------------- 2. AirPlay
+
+bold "2. AirPlay screen mirroring (optional)"
+if have uxplay; then
+  echo "UxPlay is installed."
+elif ask "Install UxPlay so the iPad can mirror its whole screen over AirPlay? (AUR package, builds locally)" n; then
+  if have omarchy; then
+    omarchy pkg aur add uxplay
+  elif have yay; then
+    yay -S --needed uxplay
+  else
+    echo "Install the 'uxplay' package from the AUR with your AUR helper, then run this again."
+  fi
+fi
+if have uxplay && have systemctl && ! systemctl is-active --quiet avahi-daemon; then
+  echo "avahi-daemon is not running, so the iPad can't find this computer."
+  if ask "Enable avahi-daemon?"; then
+    sudo systemctl enable --now avahi-daemon
+  fi
+fi
+
+# --------------------------------------------------------------------- 3. firewall
+
+bold "3. Firewall"
+if ! have ufw || ! systemctl is-active --quiet ufw 2>/dev/null; then
+  echo "ufw is not active, so nothing blocks the iPad. Nothing to do."
+else
+  lan_subnet="$(ip -4 -o route show scope link 2>/dev/null | awk '$1 ~ /^(10|172|192)\./ && $3 !~ /^(tun|wg|proton|tailscale|docker|br-|veth|virbr)/ {print $1; exit}')"
+  echo "ufw blocks incoming connections, including from your iPad."
+  echo "Inkcast needs TCP $PORT (whiteboard)$(have uxplay && echo ", plus TCP ${MIRROR_TCP[*]} and UDP ${MIRROR_UDP[*]} (AirPlay)")."
+  echo "Rules are limited to private network ranges; the internet can't reach these ports."
+  echo
+  echo "  1) Any private network (home, office, campus): ${PRIVATE_CIDRS[*]}"
+  [[ -n $lan_subnet ]] && echo "  2) Only the network you're on now: $lan_subnet"
+  echo "  3) Skip"
+  read -r -p "Choose [1]: " scope </dev/tty || scope=""
+  scope="${scope:-1}"
+  sources=()
+  case "$scope" in
+  1) sources=("${PRIVATE_CIDRS[@]}") ;;
+  2) [[ -n $lan_subnet ]] && sources=("$lan_subnet") ;;
+  esac
+  if ((${#sources[@]})); then
+    for src in "${sources[@]}"; do
+      sudo ufw allow in proto tcp from "$src" to any port "$PORT" comment "$UFW_COMMENT" >/dev/null
+      if have uxplay; then
+        for p in "${MIRROR_TCP[@]}"; do sudo ufw allow in proto tcp from "$src" to any port "$p" comment "$UFW_COMMENT" >/dev/null; done
+        for p in "${MIRROR_UDP[@]}"; do sudo ufw allow in proto udp from "$src" to any port "$p" comment "$UFW_COMMENT" >/dev/null; done
+      fi
+    done
+    sudo ufw reload >/dev/null
+    mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR"
+    printf 'port=%s\nsources=%s\n' "$PORT" "${sources[*]}" >"$DATA_DIR/firewall"
+    echo "Firewall rules added (tagged '$UFW_COMMENT'; scripts/uninstall removes them)."
+  else
+    echo "Skipped."
+  fi
+fi
+
+# --------------------------------------------------------------------- 4. extras
+
+bold "4. Extras (optional)"
+if ask "Add an 'inkcast' terminal command to $BIN_DIR?" n; then
+  mkdir -p "$BIN_DIR"
+  ln -sfn "$ROOT/bin/inkcast" "$BIN_DIR/inkcast"
+  echo "Added $BIN_DIR/inkcast"
+fi
+if ask "Add Inkcast to the app launcher (Super + Space)?" n; then
+  mkdir -p "$APP_DIR/icons"
+  cp "$ROOT/assets/icon-256.png" "$APP_DIR/icons/Inkcast.png"
+  cat >"$APP_DIR/inkcast.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Inkcast
+GenericName=Apple Pencil Whiteboard
+Comment=Write on your iPad and show it live in a window you can screen-share
+Exec="$ROOT/bin/inkcast" board
+Icon=$APP_DIR/icons/Inkcast.png
+Terminal=false
+Categories=Education;Office;Graphics;
+Keywords=ipad;pencil;whiteboard;draw;notes;pdf;annotate;
+EOF
+  if have uxplay; then
+    cat >"$APP_DIR/inkcast-mirror.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Inkcast Mirror
+GenericName=AirPlay Receiver
+Comment=Mirror your iPad or iPhone screen into a window
+Exec="$ROOT/bin/inkcast" mirror
+Icon=$APP_DIR/icons/Inkcast.png
+Terminal=true
+Categories=AudioVideo;Video;
+Keywords=airplay;mirror;ipad;iphone;screen;uxplay;
+EOF
+  fi
+  echo "Added launcher entries."
+fi
+
+bold "Done"
+"$ROOT/bin/inkcast" doctor || true

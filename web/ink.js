@@ -2,10 +2,78 @@
 
 export const COLORS = ['#111111', '#1f5fd6', '#d62f2f', '#1d9a4b', '#e07b00', '#7b3fd1', '#ffffff'];
 
+// ---------------------------------------------------------------- auth & theme
+
+// The key comes from the pairing link (?k=, the iPad) or from a one-time
+// launch code (?c=, the desktop viewer) that is swapped for the key and then
+// removed from the address bar. The viewer keeps it in sessionStorage so a
+// reload still works; nothing is stored in cookies.
+export async function getKey() {
+  const params = new URLSearchParams(location.search);
+  const code = params.get('c');
+  if (code) {
+    try {
+      const r = await fetch('/api/redeem', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ c: code }),
+      });
+      if (r.ok) {
+        const { k } = await r.json();
+        try {
+          sessionStorage.setItem('inkcast.k', k);
+        } catch {}
+        history.replaceState(null, '', location.pathname);
+        return k;
+      }
+    } catch {}
+    history.replaceState(null, '', location.pathname);
+  }
+  const k = params.get('k');
+  if (k) return k;
+  try {
+    return sessionStorage.getItem('inkcast.k') || '';
+  } catch {
+    return '';
+  }
+}
+
+export async function keyWorks(key) {
+  if (!key) return false;
+  try {
+    return (await fetch(`/api/info?k=${encodeURIComponent(key)}`)).ok;
+  } catch {
+    return true; // server unreachable: let the reconnect loop handle it
+  }
+}
+
+export function showLocked(message) {
+  const el = document.createElement('div');
+  el.id = 'locked';
+  const card = document.createElement('div');
+  card.className = 'card';
+  const h = document.createElement('h1');
+  h.textContent = 'Inkcast';
+  const p = document.createElement('p');
+  p.textContent = message;
+  card.append(h, p);
+  el.append(card);
+  document.body.append(el);
+}
+
+// Live-updating link to the Omarchy theme stylesheet.
+export function useTheme(key) {
+  const link = document.createElement('link');
+  link.rel = 'stylesheet';
+  document.head.append(link);
+  const set = (v) => (link.href = `/theme.css?k=${encodeURIComponent(key)}&v=${encodeURIComponent(v || '')}`);
+  set(Date.now());
+  return set;
+}
+
 // ---------------------------------------------------------------- connection
 
-export function connect(role, handlers) {
-  const k = new URLSearchParams(location.search).get('k') || '';
+export function connect(role, handlers, k) {
   const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=${role}&k=${encodeURIComponent(k)}`;
   let ws = null;
   let queue = [];

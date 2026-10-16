@@ -1,9 +1,13 @@
-import { COLORS, Surface, applyOp, connect, exportPDF, indexDoc, strokeHit, uploadPDF } from '/ink.js';
+import { COLORS, Surface, applyOp, connect, exportPDF, indexDoc, keyWorks, showLocked, strokeHit, uploadPDF, useTheme } from '/ink.js';
 
 const $ = (s) => document.querySelector(s);
 const stage = $('#stage');
 const key = new URLSearchParams(location.search).get('k') || '';
 const surface = new Surface(stage, key);
+const setTheme = useTheme(key);
+const LOCKED_MSG = 'This link is missing its key or the key has changed. Scan the QR code shown on your computer again.';
+if (!key) showLocked(LOCKED_MSG);
+else keyWorks(key).then((ok) => ok || showLocked(LOCKED_MSG));
 
 const HL_WIDTH = { 2: 14, 3.5: 22, 6.5: 34 };
 const ERASER_R = 10;
@@ -40,6 +44,7 @@ const net = connect('pad', {
   },
   message(msg) {
     if (msg.t === 'state') return loadState(msg.doc);
+    if (msg.t === 'theme') return setTheme(msg.v);
     if (msg.t === 'peers') return;
     if (!doc) return;
     const before = doc.page;
@@ -54,7 +59,7 @@ const net = connect('pad', {
     if ((msg.t === 'remove' || msg.t === 'restore') && page === curPage()) surface.drawInk();
     if (msg.t === 'paper' && page === curPage()) surface.drawBg();
   },
-});
+}, key);
 
 function loadState(newDoc) {
   const sameDoc = doc && doc.id === newDoc.id;

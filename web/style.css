@@ -1,4 +1,5 @@
 :root {
+  /* Defaults; /theme.css overrides these from the active Omarchy theme. */
   --bg: #1b1d23;
   --panel: #23262e;
   --panel-2: #2c3039;
@@ -8,6 +9,9 @@
   --accent: #5b9dff;
   --ok: #3ccf7a;
   --bad: #ff6b6b;
+  --letterbox: #15171c;
+  --radius: 10px;
+  --font: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
   color-scheme: dark;
 }
 * { box-sizing: border-box; }
@@ -16,7 +20,9 @@ html, body {
   height: 100%;
   background: var(--bg);
   color: var(--fg);
-  font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", system-ui, sans-serif;
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.4;
   overflow: hidden;
   -webkit-user-select: none;
   user-select: none;
@@ -42,10 +48,11 @@ button:disabled { opacity: 0.35; cursor: default; }
   left: 50%;
   bottom: calc(24px + env(safe-area-inset-bottom));
   transform: translateX(-50%);
-  background: rgba(20, 22, 27, 0.92);
+  background: var(--panel);
+  color: var(--fg);
   border: 1px solid var(--line);
   padding: 10px 16px;
-  border-radius: 10px;
+  border-radius: var(--radius);
   z-index: 50;
   max-width: calc(100vw - 32px);
 }
@@ -83,7 +90,7 @@ button:disabled { opacity: 0.35; cursor: default; }
 #bar button {
   width: 42px;
   height: 42px;
-  border-radius: 10px;
+  border-radius: var(--radius);
   display: grid;
   place-items: center;
 }
@@ -105,16 +112,18 @@ button:disabled { opacity: 0.35; cursor: default; }
   height: 22px;
   border-radius: 50%;
   background: var(--c);
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--fg) 30%, transparent);
 }
 #bar .swatch.on { box-shadow: none; background: none; }
 .swatch.on::before { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--accent); }
 #widths i {
-  width: var(--d);
-  height: var(--d);
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: currentColor;
 }
+#widths i.w-s { width: 4px; height: 4px; }
+#widths i.w-l { width: 11px; height: 11px; }
 #pageno { min-width: 58px; text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; }
 #dot {
   width: 10px;
@@ -134,7 +143,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   width: 300px;
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: calc(var(--radius) * 1.4);
   padding: 6px;
   z-index: 20;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
@@ -146,13 +155,13 @@ button:disabled { opacity: 0.35; cursor: default; }
   width: 100%;
   text-align: left;
   padding: 11px 12px;
-  border-radius: 9px;
+  border-radius: calc(var(--radius) * 0.9);
   gap: 6px;
 }
 #menu > button:active { background: var(--panel-2); }
 #menu .row button {
   padding: 5px 8px;
-  border-radius: 7px;
+  border-radius: calc(var(--radius) * 0.7);
   font-size: 13px;
   color: var(--muted);
 }
@@ -168,11 +177,41 @@ button:disabled { opacity: 0.35; cursor: default; }
   background: var(--panel);
   border: 1px solid var(--line);
   padding: 10px 14px;
-  border-radius: 10px;
+  border-radius: var(--radius);
   z-index: 5;
 }
 
 /* ------------------------------------------------------------------ viewer */
+
+.view { background: var(--letterbox); }
+.view #stage { cursor: grab; }
+.view.zoomed #stage { cursor: grab; }
+.view.dragging #stage { cursor: grabbing; }
+.view:not(.awake):not(.dragging) #stage { cursor: none; }
+#controls .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+#controls button.on { color: var(--accent); }
+#b-zoom { min-width: 52px; font-variant-numeric: tabular-nums; }
+#pair .logo { width: 56px; height: 56px; margin-bottom: 6px; }
+
+#locked {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  z-index: 100;
+  padding: 16px;
+}
+#locked .card {
+  max-width: 420px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 1.6);
+  padding: 26px;
+  text-align: center;
+}
+#locked h1 { margin: 0 0 8px; font-size: 22px; }
+#locked p { margin: 0; color: var(--muted); }
 
 #controls {
   position: fixed;
@@ -183,9 +222,9 @@ button:disabled { opacity: 0.35; cursor: default; }
   align-items: center;
   gap: 4px;
   padding: 5px;
-  background: rgba(30, 32, 39, 0.94);
+  background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: var(--radius);
   z-index: 10;
   opacity: 0;
   transition: opacity 0.25s;
@@ -195,7 +234,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   min-width: 34px;
   height: 32px;
   padding: 0 10px;
-  border-radius: 8px;
+  border-radius: calc(var(--radius) * 0.8);
   font-size: 13px;
 }
 #controls button:hover { background: var(--panel-2); }
@@ -217,7 +256,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   width: min(420px, calc(100vw - 32px));
   background: var(--panel);
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: calc(var(--radius) * 1.6);
   padding: 26px;
   text-align: center;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
@@ -230,7 +269,7 @@ button:disabled { opacity: 0.35; cursor: default; }
   height: 220px;
   background: #fff;
   padding: 10px;
-  border-radius: 12px;
+  border-radius: var(--radius);
   image-rendering: pixelated;
 }
 #url {
@@ -252,11 +291,11 @@ kbd {
   position: fixed;
   inset: 12px;
   border: 2px dashed var(--accent);
-  border-radius: 16px;
+  border-radius: calc(var(--radius) * 1.6);
   display: grid;
   place-items: center;
   font-size: 20px;
-  background: rgba(27, 29, 35, 0.75);
+  background: color-mix(in srgb, var(--bg) 75%, transparent);
   z-index: 30;
   pointer-events: none;
 }

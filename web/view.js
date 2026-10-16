@@ -1,58 +1,82 @@
-import { Surface, applyOp, connect, exportPDF, indexDoc, uploadPDF } from '/ink.js';
+import { Surface, applyOp, connect, exportPDF, getKey, indexDoc, keyWorks, showLocked, uploadPDF, useTheme } from '/ink.js';
 
 const $ = (s) => document.querySelector(s);
 const stage = $('#stage');
-const key = new URLSearchParams(location.search).get('k') || '';
+
+const key = await getKey();
 const surface = new Surface(stage, key);
+const setTheme = useTheme(key);
+if (!key || !(await keyWorks(key))) {
+  showLocked('This window has no access key. Open it from the Inkcast bar icon, or run: inkcast open');
+  throw new Error('inkcast: no key');
+}
 
 let doc = null;
 let idx = null;
 let pads = 0;
 let pairForced = null; // null = automatic, true/false = user toggled
-let cursor = null; // {page, x, y, t}
+let cursor = null; // {page, x, y}
+
+// View: `fitted` follows the window size; otherwise the user zoomed/panned.
+const MARGIN = 24;
+const MIN_ZOOM = 0.5; // relative to fit
+const MAX_ZOOM = 12;
+let fitted = true;
+let follow = true;
 
 const curPage = () => doc && doc.pages[doc.page];
 
-const net = connect('view', {
-  status(ok) {
-    $('#status').className = ok ? 'ok' : 'bad';
-    $('#status').title = ok ? 'Connected' : 'Reconnecting…';
+const net = connect(
+  'view',
+  {
+    status(ok) {
+      $('#status').className = ok ? 'ok' : 'bad';
+      $('#status').title = ok ? 'Connected' : 'Reconnecting…';
+    },
+    message(msg) {
+      if (msg.t === 'theme') return setTheme(msg.v);
+      if (msg.t === 'state') {
+        const samePage = doc && curPage()?.id === msg.doc.pages[msg.doc.page]?.id;
+        doc = msg.doc;
+        idx = indexDoc(doc);
+        pads = msg.pads;
+        showPage(!samePage);
+        return syncPair();
+      }
+      if (msg.t === 'peers') {
+        pads = msg.pads;
+        return syncPair();
+      }
+      if (!doc) return;
+      if (msg.t === 'cursor') {
+        cursor = msg.hide ? null : { page: msg.page, x: msg.x, y: msg.y };
+        if (cursor && cursor.page === curPage()?.id) keepInView(cursor.x, cursor.y);
+        return surface.queueLive();
+      }
+      const before = doc.page;
+      const page = applyOp(doc, idx, msg);
+      if (msg.t === 'goto' && doc.page !== before) return showPage(true);
+      const onPage = page && page === curPage();
+      if (msg.t === 'begin' && onPage) {
+        surface.active.set(msg.s.id, idx.strokes.get(msg.s.id));
+        surface.queueLive();
+      }
+      if (msg.t === 'pts' && surface.active.has(msg.id)) {
+        const p = msg.pts[msg.pts.length - 1];
+        if (p) keepInView(p[0], p[1]);
+        surface.queueLive();
+      }
+      if (msg.t === 'end') {
+        const s = idx.strokes.get(msg.id);
+        if (s && surface.active.has(s.id)) surface.commit(s);
+      }
+      if ((msg.t === 'remove' || msg.t === 'restore') && onPage) surface.drawInk();
+      if (msg.t === 'paper' && onPage) surface.drawBg();
+      if (msg.t !== 'pts') syncPair();
+    },
   },
-  message(msg) {
-    if (msg.t === 'state') {
-      doc = msg.doc;
-      idx = indexDoc(doc);
-      pads = msg.pads;
-      showPage();
-      return syncPair();
-    }
-    if (msg.t === 'peers') {
-      pads = msg.pads;
-      return syncPair();
-    }
-    if (!doc) return;
-    if (msg.t === 'cursor') {
-      cursor = msg.hide ? null : { page: msg.page, x: msg.x, y: msg.y, t: performance.now() };
-      return surface.queueLive();
-    }
-    const before = doc.page;
-    const page = applyOp(doc, idx, msg);
-    if (msg.t === 'goto' && doc.page !== before) return showPage();
-    const onPage = page && page === curPage();
-    if (msg.t === 'begin' && onPage) {
-      surface.active.set(msg.s.id, idx.strokes.get(msg.s.id));
-      surface.queueLive();
-    }
-    if (msg.t === 'pts' && surface.active.has(msg.id)) surface.queueLive();
-    if (msg.t === 'end') {
-      const s = idx.strokes.get(msg.id);
-      if (s && surface.active.has(s.id)) surface.commit(s);
-    }
-    if ((msg.t === 'remove' || msg.t === 'restore') && onPage) surface.drawInk();
-    if (msg.t === 'paper' && onPage) surface.drawBg();
-    if (msg.t !== 'pts') syncPair();
-  },
-});
+  key,
+);
 
 // Pen tip / hover cursor so viewers can follow along.
 surface.overlay = (ctx, k) => {
@@ -60,13 +84,13 @@ surface.overlay = (ctx, k) => {
   let at = null;
   for (const s of surface.active.values()) {
     const p = s.pts[s.pts.length - 1];
-    if (p) at = [p[0], p[1], s.color];
+    if (p) at = p;
   }
-  if (!at && cursor && cursor.page === page?.id) at = [cursor.x, cursor.y, null];
+  if (!at && cursor && cursor.page === page?.id) at = [cursor.x, cursor.y];
   if (!at) return;
   ctx.save();
   ctx.beginPath();
-  ctx.arc(at[0] * k, at[1] * k, Math.max(4, 5 * k), 0, Math.PI * 2);
+  ctx.arc(at[0] * k, at[1] * k, Math.max(4, Math.min(14, 5 * k)), 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(230, 60, 60, 0.35)';
   ctx.strokeStyle = 'rgba(230, 60, 60, 0.9)';
   ctx.lineWidth = 1.5;
@@ -75,19 +99,160 @@ surface.overlay = (ctx, k) => {
   ctx.restore();
 };
 
-function showPage() {
+function showPage(refit = true) {
   surface.active.clear();
-  surface.fit(curPage(), 24);
+  if (refit || fitted) fit();
   surface.setPage(curPage());
   $('#pageno').textContent = `${doc.page + 1} / ${doc.pages.length}`;
+  $('#b-prev').disabled = doc.page === 0;
+  $('#b-next').disabled = doc.page === doc.pages.length - 1;
 }
 
 function gotoPage(i) {
-  if (!doc || i < 0 || i >= doc.pages.length) return;
+  if (!doc || i < 0 || i >= doc.pages.length || i === doc.page) return;
   doc.page = i;
   net.send({ t: 'goto', index: i });
-  showPage();
+  showPage(true);
 }
+
+// ---------------------------------------------------------------- zoom & pan
+
+const fitScale = () => {
+  const p = curPage();
+  return p ? Math.max(0.01, Math.min((surface.cw - MARGIN * 2) / p.w, (surface.ch - MARGIN * 2) / p.h)) : 1;
+};
+
+function fit() {
+  fitted = true;
+  surface.fit(curPage(), MARGIN);
+  syncZoomLabel();
+}
+
+let redrawQueued = false;
+function queueRedraw() {
+  if (redrawQueued) return;
+  redrawQueued = true;
+  requestAnimationFrame(() => {
+    redrawQueued = false;
+    surface.redraw();
+  });
+}
+
+function setView(s, x, y) {
+  const f = fitScale();
+  const p = curPage();
+  s = Math.min(f * MAX_ZOOM, Math.max(f * MIN_ZOOM, s));
+  // Keep at least a sliver of the page on screen.
+  const keep = 80;
+  x = Math.min(surface.cw - keep, Math.max(keep - p.w * s, x));
+  y = Math.min(surface.ch - keep, Math.max(keep - p.h * s, y));
+  surface.view = { s, x, y };
+  fitted = false;
+  syncZoomLabel();
+  queueRedraw();
+}
+
+function zoomAt(cx, cy, factor) {
+  if (!doc) return;
+  const v = surface.view;
+  const s = Math.min(fitScale() * MAX_ZOOM, Math.max(fitScale() * MIN_ZOOM, v.s * factor));
+  const r = s / v.s;
+  setView(s, cx - (cx - v.x) * r, cy - (cy - v.y) * r);
+}
+
+function zoomCenter(factor) {
+  zoomAt(surface.cw / 2, surface.ch / 2, factor);
+}
+
+function syncZoomLabel() {
+  const pct = Math.round((surface.view.s / fitScale()) * 100);
+  $('#b-zoom').textContent = fitted ? 'Fit' : `${pct}%`;
+  $('#b-follow').hidden = fitted;
+  document.body.classList.toggle('zoomed', !fitted);
+}
+
+// While zoomed in, slide the view to keep the pen in sight.
+let followAnim = 0;
+function keepInView(px, py) {
+  if (fitted || !follow || dragging) return;
+  const v = surface.view;
+  const sx = v.x + px * v.s, sy = v.y + py * v.s;
+  const mx = surface.cw * 0.15, my = surface.ch * 0.15;
+  let dx = 0, dy = 0;
+  if (sx < mx) dx = surface.cw / 2 - sx;
+  else if (sx > surface.cw - mx) dx = surface.cw / 2 - sx;
+  if (sy < my) dy = surface.ch / 2 - sy;
+  else if (sy > surface.ch - my) dy = surface.ch / 2 - sy;
+  if (!dx && !dy) return;
+  const target = { x: v.x + dx, y: v.y + dy };
+  cancelAnimationFrame(followAnim);
+  const step = () => {
+    const c = surface.view;
+    const nx = c.x + (target.x - c.x) * 0.25, ny = c.y + (target.y - c.y) * 0.25;
+    setView(c.s, nx, ny);
+    if (Math.abs(target.x - nx) + Math.abs(target.y - ny) > 1) followAnim = requestAnimationFrame(step);
+  };
+  followAnim = requestAnimationFrame(step);
+}
+
+// Mouse wheel zooms at the pointer; a touchpad's two-finger scroll pans and
+// its pinch (reported as ctrl+wheel) zooms.
+stage.addEventListener(
+  'wheel',
+  (e) => {
+    e.preventDefault();
+    if (!doc) return;
+    const r = stage.getBoundingClientRect();
+    const cx = e.clientX - r.left, cy = e.clientY - r.top;
+    const lines = e.deltaMode === 1;
+    const mouseWheel = lines || (e.deltaX === 0 && Math.abs(e.deltaY) >= 40 && Number.isInteger(e.deltaY));
+    if (e.ctrlKey) zoomAt(cx, cy, Math.exp(-e.deltaY * 0.01));
+    else if (mouseWheel) {
+      // One notch is ~100px (or 3 lines); bigger deltas mean a faster spin.
+      const notches = Math.min(4, Math.max(1, Math.abs(e.deltaY) / (lines ? 3 : 100)));
+      zoomAt(cx, cy, Math.pow(e.deltaY < 0 ? 1.18 : 1 / 1.18, notches));
+    }
+    else setView(surface.view.s, surface.view.x - e.deltaX, surface.view.y - e.deltaY);
+    wake();
+  },
+  { passive: false },
+);
+
+// Grab and drag to move around.
+let dragging = null;
+stage.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0 && e.button !== 1) return;
+  if (!doc) return;
+  cancelAnimationFrame(followAnim);
+  dragging = { id: e.pointerId, x: e.clientX, y: e.clientY, vx: surface.view.x, vy: surface.view.y };
+  try {
+    stage.setPointerCapture(e.pointerId);
+  } catch {}
+  document.body.classList.add('dragging');
+});
+stage.addEventListener('pointermove', (e) => {
+  if (!dragging || e.pointerId !== dragging.id) return;
+  const dx = e.clientX - dragging.x, dy = e.clientY - dragging.y;
+  if (fitted && Math.abs(dx) + Math.abs(dy) < 3) return;
+  setView(surface.view.s, dragging.vx + dx, dragging.vy + dy);
+});
+const endDrag = (e) => {
+  if (!dragging || e.pointerId !== dragging.id) return;
+  dragging = null;
+  document.body.classList.remove('dragging');
+};
+stage.addEventListener('pointerup', endDrag);
+stage.addEventListener('pointercancel', endDrag);
+stage.addEventListener('dblclick', (e) => {
+  if (!doc) return;
+  if (fitted) {
+    const r = stage.getBoundingClientRect();
+    zoomAt(e.clientX - r.left, e.clientY - r.top, 2);
+  } else {
+    fit();
+    surface.redraw();
+  }
+});
 
 // ---------------------------------------------------------------- pairing card
 
@@ -95,14 +260,14 @@ let infoLoaded = false;
 async function loadInfo() {
   if (infoLoaded) return;
   try {
-    const r = await fetch('/api/info');
+    const r = await fetch(`/api/info?k=${encodeURIComponent(key)}`);
     if (!r.ok) return;
     const info = await r.json();
     const url = info.urls[0];
-    $('#url').textContent = url || 'No Wi-Fi address found. Connect to a network and restart Inkcast.';
+    $('#url').textContent = url || 'No Wi-Fi address found. Connect to a network, then restart Inkcast.';
     const qr = $('#qr');
     qr.onerror = () => (qr.hidden = true);
-    if (url) qr.src = '/api/qr.svg?' + Date.now();
+    if (url) qr.src = `/api/qr.svg?k=${encodeURIComponent(key)}&t=${Date.now()}`;
     else qr.hidden = true;
     infoLoaded = true;
   } catch {}
@@ -154,13 +319,28 @@ function togglePair() {
   syncPair();
 }
 
+function toggleFollow() {
+  follow = !follow;
+  $('#b-follow').classList.toggle('on', follow);
+  toast(follow ? 'Following the pen' : 'Not following the pen', 1200);
+}
+
 function fullscreen() {
   if (document.fullscreenElement) document.exitFullscreen();
   else document.documentElement.requestFullscreen().catch(() => {});
 }
 
+function resetZoom() {
+  fit();
+  surface.redraw();
+}
+
 $('#b-prev').onclick = () => gotoPage((doc?.page ?? 0) - 1);
 $('#b-next').onclick = () => gotoPage((doc?.page ?? 0) + 1);
+$('#b-zin').onclick = () => zoomCenter(1.25);
+$('#b-zout').onclick = () => zoomCenter(1 / 1.25);
+$('#b-zoom').onclick = resetZoom;
+$('#b-follow').onclick = toggleFollow;
 $('#b-qr').onclick = togglePair;
 $('#b-pdf').onclick = () => $('#file').click();
 $('#b-export').onclick = save;
@@ -180,12 +360,18 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'f') fullscreen();
   else if (k === 'o') $('#file').click();
   else if (k === 's') save();
+  else if (k === 'l') toggleFollow();
+  else if (k === '0') resetZoom();
+  else if (k === '+' || k === '=') zoomCenter(1.25);
+  else if (k === '-' || k === '_') zoomCenter(1 / 1.25);
   else if (k === 'arrowright' || k === 'pagedown' || k === ' ') gotoPage((doc?.page ?? 0) + 1);
   else if (k === 'arrowleft' || k === 'pageup') gotoPage((doc?.page ?? 0) - 1);
   else if (k === 'escape' && !$('#pair').hidden) togglePair();
+  else return;
+  e.preventDefault();
 });
 
-// Hide the controls when the mouse is idle so screen shares stay clean.
+// Hide the controls and cursor when the mouse is idle so screen shares stay clean.
 let idleTimer = 0;
 function wake() {
   document.body.classList.add('awake');
@@ -196,12 +382,15 @@ document.addEventListener('mousemove', wake);
 
 // Drag and drop a PDF onto the window.
 let dragDepth = 0;
+const hasFiles = (e) => [...(e.dataTransfer?.types || [])].includes('Files');
 document.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return;
   e.preventDefault();
   dragDepth++;
   $('#drop').hidden = false;
 });
-document.addEventListener('dragleave', () => {
+document.addEventListener('dragleave', (e) => {
+  if (!hasFiles(e)) return;
   if (--dragDepth <= 0) $('#drop').hidden = true;
 });
 document.addEventListener('dragover', (e) => e.preventDefault());
@@ -209,14 +398,19 @@ document.addEventListener('drop', (e) => {
   e.preventDefault();
   dragDepth = 0;
   $('#drop').hidden = true;
-  const f = [...e.dataTransfer.files].find((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
+  const f = [...(e.dataTransfer?.files || [])].find((f) => f.type === 'application/pdf' || /\.pdf$/i.test(f.name));
   if (f) openPDF(f);
   else toast('That is not a PDF');
 });
 
 function layout() {
+  const before = { w: surface.cw, h: surface.ch };
   surface.resize();
-  if (doc) showPage();
+  if (!doc) return;
+  if (fitted) return showPage(true);
+  // Keep the same point centered when the window changes size.
+  const v = surface.view;
+  setView(v.s, v.x + (surface.cw - before.w) / 2, v.y + (surface.ch - before.h) / 2);
 }
 window.addEventListener('resize', layout);
 layout();

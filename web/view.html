@@ -12,23 +12,30 @@
 
 <section id="pair" hidden>
   <div class="card">
+    <img class="logo" src="/icon.svg" alt="">
     <h1>Inkcast</h1>
-    <p>On your iPad, scan this or open the link in Safari. Both devices need to be on the same Wi-Fi.</p>
+    <p>On your iPad, scan this with the Camera app or open the link in Safari. Both devices need to be on the same Wi-Fi.</p>
     <img id="qr" alt="QR code for the iPad link">
     <code id="url"></code>
-    <p class="small">Press <kbd>Q</kbd> to show or hide this. Drop a PDF here to write on it.</p>
+    <p class="small"><kbd>Q</kbd> show/hide this · drop a PDF here to write on it</p>
   </div>
 </section>
 
-<nav id="controls">
-  <span id="status"></span>
-  <button id="b-prev" title="Previous page (←)">‹</button>
+<nav id="controls" aria-label="Viewer controls">
+  <span id="status" title="Connecting…"></span>
+  <button id="b-prev" title="Previous page (←)" aria-label="Previous page">‹</button>
   <span id="pageno"></span>
-  <button id="b-next" title="Next page (→)">›</button>
+  <button id="b-next" title="Next page (→)" aria-label="Next page">›</button>
+  <span class="sep"></span>
+  <button id="b-zout" title="Zoom out (−)" aria-label="Zoom out">−</button>
+  <button id="b-zoom" title="Fit page (0 or double-click)">Fit</button>
+  <button id="b-zin" title="Zoom in (+)" aria-label="Zoom in">+</button>
+  <button id="b-follow" class="on" title="Follow the pen while zoomed in (L)">Follow</button>
+  <span class="sep"></span>
   <button id="b-qr" title="Pair an iPad (Q)">Pair</button>
   <button id="b-pdf" title="Open a PDF (O)">PDF</button>
   <button id="b-export" title="Save notebook as PDF (S)">Save</button>
-  <button id="b-full" title="Full screen (F)">⛶</button>
+  <button id="b-full" title="Full screen (F)" aria-label="Full screen">⛶</button>
 </nav>
 <input type="file" id="file" accept="application/pdf,.pdf" hidden>
 <div id="drop" hidden>Drop the PDF to open it</div>
