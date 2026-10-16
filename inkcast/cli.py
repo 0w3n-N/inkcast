@@ -117,7 +117,7 @@ def start_background(args):
     if ping(args.port):
         return True
     log = log_dir() / "server.log"
-    cmd = [sys.executable, "-m", "inkcast", "serve", "--port", str(args.port), "--quiet"]
+    cmd = [sys.executable, "-B", "-m", "inkcast", "serve", "--port", str(args.port), "--quiet"]
     if args.host:
         cmd += ["--host", args.host]
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
