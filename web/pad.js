@@ -7,6 +7,12 @@ const surface = new Surface(stage, key);
 
 const HL_WIDTH = { 2: 14, 3.5: 22, 6.5: 34 };
 const ERASER_R = 10;
+// Apple Pencil's barrel double-tap is not exposed to web pages, so a quick
+// double-tap of the tip on the same spot toggles pen <-> eraser instead.
+const TAP_MAX_MS = 200; // a tap is shorter than this...
+const TAP_MAX_PX = 6; // ...and moves less than this
+const DOUBLE_TAP_GAP_MS = 300; // between lifting the first tap and touching down again
+const DOUBLE_TAP_PX = 16; // the two taps land this close together
 
 let doc = null;
 let idx = null;
@@ -14,6 +20,9 @@ let tool = 'pen';
 let color = COLORS[0];
 let width = 3.5;
 let fingerDraw = localStorage.getItem('inkcast.finger') === '1';
+let doubleTapToggle = localStorage.getItem('inkcast.doubletap') !== '0';
+let lastTool = 'pen';
+let lastTap = null; // {up, x, y, undoLen, redo}
 let undo = [];
 let redo = [];
 let zoomed = false;
@@ -133,8 +142,9 @@ function startDraw(e) {
   const page = curPage();
   const pt = point(e);
   capture(e);
+  const base = { pointerId: e.pointerId, pointerType: e.pointerType, page: page.id, t0: performance.now(), x0: e.clientX, y0: e.clientY, moved: 0 };
   if (tool === 'eraser') {
-    drawing = { pointerId: e.pointerId, pointerType: e.pointerType, page: page.id, stroke: null, removed: [] };
+    drawing = { ...base, stroke: null, removed: [] };
     eraseAt(pt);
     return;
   }
@@ -148,7 +158,7 @@ function startDraw(e) {
   };
   page.strokes.push(s);
   idx.strokes.set(s.id, s);
-  drawing = { pointerId: e.pointerId, pointerType: e.pointerType, page: page.id, stroke: s };
+  drawing = { ...base, stroke: s };
   surface.active.set(s.id, s);
   net.send({ t: 'begin', page: page.id, s });
   surface.queueLive();
@@ -157,6 +167,7 @@ function startDraw(e) {
 function moveDraw(e) {
   const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
   const list = events.length ? events : [e];
+  for (const ev of list) drawing.moved = Math.max(drawing.moved, Math.hypot(ev.clientX - drawing.x0, ev.clientY - drawing.y0));
   if (!drawing.stroke) {
     for (const ev of list) eraseAt(point(ev));
     return;
@@ -180,6 +191,8 @@ function endDraw(cancel = false) {
   flush();
   const d = drawing;
   drawing = null;
+  const undoLen = undo.length;
+  const redoBefore = redo.slice();
   if (d.stroke) {
     if (cancel) {
       removeStrokes(d.page, [d.stroke.id], true);
@@ -193,6 +206,32 @@ function endDraw(cancel = false) {
     surface.queueLive();
     if (d.removed.length) pushUndo({ t: 'erase', page: d.page, strokes: d.removed });
   }
+  checkDoubleTap(d, undoLen, redoBefore);
+}
+
+function checkDoubleTap(d, undoLen, redoBefore) {
+  const now = performance.now();
+  const isTap = doubleTapToggle && d.pointerType === 'pen' && now - d.t0 < TAP_MAX_MS && d.moved < TAP_MAX_PX;
+  if (!isTap) {
+    lastTap = null;
+    return;
+  }
+  const prev = lastTap;
+  if (prev && d.t0 - prev.up < DOUBLE_TAP_GAP_MS && Math.hypot(d.x0 - prev.x, d.y0 - prev.y) < DOUBLE_TAP_PX) {
+    // Take back whatever the two taps did (dots drawn or strokes erased).
+    while (undo.length > prev.undoLen) applyHistory(undo.pop(), true);
+    redo = prev.redo;
+    syncUndoButtons();
+    lastTap = null;
+    toggleEraser();
+    return;
+  }
+  lastTap = { up: now, x: d.x0, y: d.y0, undoLen, redo: redoBefore };
+}
+
+function toggleEraser() {
+  setTool(tool === 'eraser' ? lastTool : 'eraser');
+  toast(tool === 'eraser' ? 'Eraser' : tool === 'hl' ? 'Highlighter' : 'Pen', 700);
 }
 
 function eraseAt(pt) {
@@ -284,7 +323,7 @@ let viewQueued = false;
 
 function fitScale() {
   const p = curPage();
-  return Math.min((surface.cw - 24) / p.w, (surface.ch - 24) / p.h);
+  return Math.max(0.01, Math.min((surface.cw - 24) / p.w, (surface.ch - 24) / p.h));
 }
 
 function setZoomed(z) {
@@ -409,6 +448,7 @@ for (const c of COLORS) {
 }
 
 function setTool(t) {
+  if (t === 'eraser' && tool !== 'eraser') lastTool = tool;
   tool = t;
   document.querySelectorAll('[data-tool]').forEach((b) => b.classList.toggle('on', b.dataset.tool === t));
 }
@@ -479,6 +519,12 @@ document.querySelectorAll('[data-paper]').forEach(
       showPage(false);
     }),
 );
+const dt = $('#doubletap');
+dt.checked = doubleTapToggle;
+dt.onchange = () => {
+  doubleTapToggle = dt.checked;
+  localStorage.setItem('inkcast.doubletap', doubleTapToggle ? '1' : '0');
+};
 const fd = $('#fingerdraw');
 fd.checked = fingerDraw;
 fd.onchange = () => {

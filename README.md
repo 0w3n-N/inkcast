@@ -53,6 +53,7 @@ On the iPad:
 | Input | Action |
 | --- | --- |
 | Pencil | draw / highlight / erase |
+| Double-tap the Pencil tip (same spot, quickly) | switch between pen and eraser (can be turned off in the ⋯ menu) |
 | One finger | pan |
 | Two fingers | pinch to zoom (only on the iPad; the shared window always shows the full page) |
 | Menu › Draw with finger too | draw with a finger (no Pencil) |
@@ -67,6 +68,12 @@ In the viewer window (move the mouse to show the controls):
 | `O` | open a PDF (or drag and drop a PDF onto the window) |
 | `S` | save the whole notebook, ink included, as a PDF |
 | `F` | full screen |
+
+The Pencil's own barrel double-tap and the Pencil Pro squeeze only reach
+native apps; Safari doesn't pass them to web pages. Inkcast uses a quick
+double-tap of the tip on the screen instead. The two taps must land within
+about 16 px and 300 ms of each other, so a colon or an ellipsis won't trigger
+it, and the dots the taps leave are removed automatically.
 
 On iPads that support hover (M2 iPad Pro and newer), a red dot follows the
 hovering Pencil, so people on the call can see where you're pointing.

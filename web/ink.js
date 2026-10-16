@@ -77,7 +77,7 @@ export function drawStroke(ctx, s, k) {
   }
   if (p.length === 1) {
     ctx.beginPath();
-    ctx.arc(p[0][0] * k, p[0][1] * k, (pressureWidth(s.width, p[0][2]) * k) / 2, 0, Math.PI * 2);
+    ctx.arc(p[0][0] * k, p[0][1] * k, Math.max(0.1, (pressureWidth(s.width, p[0][2]) * k) / 2), 0, Math.PI * 2);
     ctx.fill();
     return;
   }
@@ -216,7 +216,8 @@ export class Surface {
   }
   fit(page = this.page, margin = 16) {
     if (!page) return;
-    const s = Math.min((this.cw - margin * 2) / page.w, (this.ch - margin * 2) / page.h);
+    // Clamp: the stage can be 0x0 while hidden or mid-rotation.
+    const s = Math.max(0.01, Math.min((this.cw - margin * 2) / page.w, (this.ch - margin * 2) / page.h));
     this.view = { s, x: (this.cw - page.w * s) / 2, y: (this.ch - page.h * s) / 2 };
   }
   toPage(cx, cy) {
