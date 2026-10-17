@@ -50,8 +50,11 @@ PORT = free_port()
 INKCAST = [sys.executable, "-B", os.path.join(ROOT, "bin", "inkcast")]
 
 
+HOST = []  # set below if this machine has no LAN address (some CI VMs)
+
+
 def run(*args, port=True):
-    extra = ["--port", str(PORT)] if port else []
+    extra = ["--port", str(PORT)] + HOST if port else []
     return subprocess.run(INKCAST + list(args) + extra, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=90, env=os.environ)
 
@@ -67,6 +70,9 @@ r = run("doctor", "--json", port=False)
 doc = json.loads(r.stdout or "{}")
 check("doctor runs", r.returncode == 0 and doc.get("version"), r.stderr[-300:])
 check("doctor reports the OS", doc.get("os") in ("linux", "macos", "windows"), doc)
+if not doc.get("lan"):
+    print("no LAN address on this machine; advertising 127.0.0.1 with --host")
+    HOST = ["--host", "127.0.0.1"]
 
 # the CLI starts the background server (detached process, per-OS flags)
 r = run("start")
