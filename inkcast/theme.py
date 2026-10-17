@@ -6,6 +6,8 @@ into the stylesheet, so a theme file can't inject CSS. Without Omarchy (or on
 macOS) the stylesheet is empty and the built-in palette applies.
 """
 
+from __future__ import annotations
+
 import hashlib
 import os
 import re

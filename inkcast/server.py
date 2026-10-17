@@ -14,6 +14,8 @@ Security model (see SECURITY.md):
     relayed, and sizes are capped.
 """
 
+from __future__ import annotations
+
 import base64
 import hashlib
 import hmac
@@ -35,7 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__
+from . import __version__, qr
 from .theme import Theme
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
@@ -79,7 +81,15 @@ PAGES = {"/": "pad.html", "/pad": "pad.html", "/view": "view.html"}
 # --------------------------------------------------------------------------- paths
 
 
+WINDOWS = os.name == "nt"
+# Helper programs (pdftoppm, ...) must not flash a console window on Windows.
+NO_WINDOW = {"creationflags": 0x08000000} if WINDOWS else {}  # CREATE_NO_WINDOW
+
+
 def data_dir() -> Path:
+    if WINDOWS:
+        base = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~/AppData/Local")
+        return private_dir(Path(base) / "Inkcast")
     if sys.platform == "darwin" and "XDG_DATA_HOME" not in os.environ:
         base = os.path.expanduser("~/Library/Application Support")
     else:
@@ -95,8 +105,11 @@ def runtime_dir() -> Path:
 
 
 def private_dir(d: Path) -> Path:
+    """A directory only this user can read. On Windows the per-user profile
+    folders (%LOCALAPPDATA%) are already private to the user."""
     d.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(d, 0o700)
+    if not WINDOWS:
+        os.chmod(d, 0o700)
     return d
 
 
@@ -114,7 +127,8 @@ def load_token(store: Path) -> str:
     try:
         value = tok.read_text().strip()
         if re.fullmatch(r"[A-Za-z0-9_-]{22,64}", value):
-            os.chmod(tok, 0o600)
+            if not WINDOWS:
+                os.chmod(tok, 0o600)
             return value
     except OSError:
         pass
@@ -319,9 +333,10 @@ class WSConn:
         return buf
 
     def recv(self):
-        """Return the next text message, or None when the socket closes."""
+        """The next message: str (text), bytes (binary), or None when the socket closes."""
         parts = []
         size = 0
+        kind = None
         while True:
             b1, b2 = self._read(2)
             fin, opcode = b1 & 0x80, b1 & 0x0F
@@ -350,11 +365,13 @@ class WSConn:
             if opcode == 0xA:
                 size -= n
                 continue
-            if opcode not in (0x0, 0x1):
+            if opcode not in (0x0, 0x1, 0x2) or (opcode == 0x0) == (kind is None):
                 raise ConnectionError("unsupported frame")
+            kind = kind or opcode
             parts.append(data)
             if fin:
-                return b"".join(parts).decode("utf-8", "replace")
+                data = b"".join(parts)
+                return data.decode("utf-8", "replace") if kind == 0x1 else data
 
 
 # --------------------------------------------------------------------------- Document hub
@@ -370,8 +387,22 @@ class Hub:
         self._index()
         self._dirty = False
         self.live = {"state": "idle", "page": None}
-        self.capture = None
+        self.capture = None  # native capture (Linux portal), or
+        self.source = None   # a share window streaming frames it captured in the browser
         self.frame = None
+        self._native = None
+
+    def native_capture(self):
+        """Linux with the portal/GStreamer stack captures windows itself; elsewhere
+        (Windows, macOS) the share window captures them through the browser."""
+        if self._native is None:
+            from .capture import missing_dependencies
+
+            self._native = sys.platform.startswith("linux") and not missing_dependencies()
+        return self._native
+
+    def capture_mode(self):
+        return "native" if self.native_capture() else "browser"
 
     # persistence
     def _load(self):
@@ -412,7 +443,8 @@ class Hub:
             if len(self.conns) >= MAX_WS_CLIENTS:
                 return False
             self.conns.append(conn)
-            conn.send({"t": "state", "doc": self.doc, "live": self.live, "you": conn.id, **self.peers()})
+            conn.send({"t": "state", "doc": self.doc, "live": self.live, "capture": self.capture_mode(),
+                       "you": conn.id, **self.peers()})
             if self.frame and self.live["state"] == "live":
                 conn.send_binary(self.frame)
             self.broadcast({"t": "peers", **self.peers()})
@@ -423,6 +455,8 @@ class Hub:
         with self.lock:
             if conn in self.conns:
                 self.conns.remove(conn)
+            if conn is self.source:
+                self._source_end("closed")
             self.broadcast({"t": "peers", **self.peers()})
             if conn.role == "pad":
                 self.broadcast({"t": "cursor", "hide": True, "from": conn.id})
@@ -440,7 +474,7 @@ class Hub:
 
     def send_state(self):
         with self.lock:
-            msg = {"t": "state", "doc": self.doc, "live": self.live, **self.peers()}
+            msg = {"t": "state", "doc": self.doc, "live": self.live, "capture": self.capture_mode(), **self.peers()}
             for c in list(self.conns):
                 c.send({**msg, "you": c.id})
         self.on_change()
@@ -517,9 +551,26 @@ class Hub:
             elif t == "live":
                 action = msg.get("action")
                 if action == "start":
-                    self.live_start()
+                    if self.native_capture():
+                        self.live_start()
+                    elif not (self.capture or self.source):
+                        # The browser only opens its picker after a click there,
+                        # so ask the share window(s) to show a button for it.
+                        self.broadcast({"t": "live", "state": "needs-desktop"})
                 elif action == "stop":
                     self.live_stop()
+                elif action in ("source", "resize") and conn.role == "view":
+                    w, h = num(msg.get("w"), 16, 16384), num(msg.get("h"), 16, 16384)
+                    if w is None or h is None:
+                        return
+                    if action == "resize":
+                        if conn is self.source:
+                            self._live_resized(int(w), int(h))
+                    elif self.capture or self.source:
+                        conn.send({"t": "live", "state": "error", "error": "Another window is already live."})
+                    else:
+                        self.source = conn
+                        self._live_started(int(w), int(h))
                 return
             elif t == "addpage":
                 if len(self.doc["pages"]) >= MAX_PAGES:
@@ -540,6 +591,7 @@ class Hub:
                     self.doc["page"] = min(self.doc["page"], len(self.doc["pages"]) - 1)
                     self._index()
                     self.touch()
+                    self.gc_images()
                     self.send_state()
                 return
             elif t == "newdoc":
@@ -581,6 +633,9 @@ class Hub:
     def live_stop(self, wait=0.0):
         with self.lock:
             cap = self.capture
+            if self.source:
+                self._source_end("stopped")
+                return
         if cap:
             cap.stop()
             if wait:
@@ -602,6 +657,19 @@ class Hub:
         self.send_state()
         self.broadcast({"t": "live", "state": "live"})
         self.on_change()
+
+    def handle_frame(self, conn, data):
+        """A JPEG frame from the share window that is capturing a window."""
+        if conn is self.source and data[:3] == b"\xff\xd8\xff":
+            self._live_frame(data)
+
+    def _source_end(self, reason):
+        with self.lock:
+            src = self.source
+            self.source = None
+        if src is not None:
+            src.send({"t": "live", "state": "source-stop"})
+            self._live_ended(reason)
 
     def _live_frame(self, jpeg):
         self.frame = jpeg
@@ -692,7 +760,7 @@ def limited(cmd):
 
 def pdf_page_sizes(path: Path):
     out = subprocess.run(limited(["pdfinfo", "-f", "1", "-l", str(MAX_PAGES), str(path)]),
-                         capture_output=True, text=True, timeout=60, errors="replace")
+                         capture_output=True, text=True, timeout=60, errors="replace", **NO_WINDOW)
     if out.returncode != 0:
         raise ValueError((out.stderr.strip().splitlines() or ["pdfinfo failed"])[-1][:200])
     sizes, rot = [], {}
@@ -730,7 +798,7 @@ def render_pdf_page(store: Path, rev: str, n: int) -> Path | None:
                 try:
                     subprocess.run(limited(["pdftoppm", "-png", "-singlefile", "-f", str(n), "-l", str(n),
                                             "-scale-to", str(PDF_RENDER_PX), str(pdf), str(cache / f"{n}")]),
-                                   capture_output=True, timeout=120)
+                                   capture_output=True, timeout=120, **NO_WINDOW)
                 except subprocess.TimeoutExpired:
                     return None
     return out if out.exists() else None
@@ -955,10 +1023,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _qr(self):
         url = (self.app.pad_urls() or [""])[0]
-        if not url or not shutil.which("qrencode"):
-            return self._deny(404, "qrencode is not installed")
-        out = qrencode(url, "SVG", "--rle")
-        self._send(200, out.stdout, "image/svg+xml")
+        if not url:
+            return self._deny(404, "no network address")
+        self._send(200, qr.svg(url, border=1).encode(), "image/svg+xml")
 
     def _websocket(self, role):
         key = self.headers.get("Sec-WebSocket-Key")
@@ -984,6 +1051,9 @@ class Handler(BaseHTTPRequestHandler):
                 raw = conn.recv()
                 if raw is None:
                     break
+                if isinstance(raw, bytes):
+                    hub.handle_frame(conn, raw)
+                    continue
                 try:
                     msg = json.loads(raw)
                 except (ValueError, RecursionError):
@@ -999,29 +1069,71 @@ class Handler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------------------- Network helpers
 
 SKIP_IFACES = re.compile(r"^(lo|tun|tap|wg|proton|tailscale|docker|br-|veth|virbr|utun|llw|awdl|bridge|zt|anpi|ap\d)")
+# Windows interface aliases (e.g. "Wi-Fi", "Ethernet", "ProtonVPN", "vEthernet (WSL)").
+SKIP_WINDOWS_IFACES = re.compile(r"vpn|tap|tun|wireguard|tailscale|zerotier|vethernet|virtualbox|vmware|"
+                                 r"hyper-v|wsl|loopback|bluetooth|npcap", re.I)
+_lan_cache = (0.0, [])
+
+
+def _windows_interfaces():
+    """(alias, IPv4) pairs from PowerShell; falls back to the host's addresses."""
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                              "Get-NetIPAddress -AddressFamily IPv4 | Select-Object InterfaceAlias,IPAddress "
+                              "| ConvertTo-Json -Compress"],
+                             capture_output=True, text=True, timeout=8, **NO_WINDOW).stdout
+        rows = json.loads(out or "[]")
+        rows = rows if isinstance(rows, list) else [rows]
+        return [("~" if SKIP_WINDOWS_IFACES.search(r.get("InterfaceAlias") or "") else "", r.get("IPAddress", ""))
+                for r in rows if isinstance(r, dict)]
+    except (OSError, ValueError, subprocess.SubprocessError):
+        try:
+            return [("", ai[4][0]) for ai in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)]
+        except OSError:
+            return []
 
 
 def lan_addresses():
-    """Private IPv4 addresses of physical-looking interfaces, best first."""
+    """Private IPv4 addresses of physical-looking interfaces, best first (cached 15 s)."""
+    global _lan_cache
+    if time.monotonic() - _lan_cache[0] < 15:
+        return list(_lan_cache[1])
+    result = _lan_addresses()
+    _lan_cache = (time.monotonic(), result)
+    return list(result)
+
+
+def _posix_interfaces():
+    """(interface, IPv4) pairs from `ip` (Linux) or `ifconfig` (macOS/BSD)."""
     found = []
     try:
         out = subprocess.run(["ip", "-j", "-4", "addr"], capture_output=True, text=True, timeout=5)
         for iface in json.loads(out.stdout or "[]"):
-            name = iface.get("ifname", "")
             for a in iface.get("addr_info", []):
-                found.append((name, a.get("local", "")))
+                found.append((iface.get("ifname", ""), a.get("local", "")))
+        return found
     except (OSError, ValueError, subprocess.SubprocessError):
-        try:  # macOS / BSD
-            out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
-            name = ""
-            for line in out.splitlines():
-                if line and not line[0].isspace():
-                    name = line.split(":")[0]
-                m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", line)
-                if m:
-                    found.append((name, m.group(1)))
-        except (OSError, subprocess.SubprocessError):
-            pass
+        pass
+    try:
+        out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return found
+    name = ""
+    for line in out.splitlines():
+        if line and not line[0].isspace():
+            name = line.split(":")[0]
+        m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", line)
+        if m:
+            found.append((name, m.group(1)))
+    return found
+
+
+def _lan_addresses():
+    if WINDOWS:
+        # "~" marks VPN/virtual adapters; mapping it to "tun" lets SKIP_IFACES drop it.
+        found = [("tun" if alias == "~" else "wi-fi", ip) for alias, ip in _windows_interfaces()]
+    else:
+        found = _posix_interfaces()
 
     def private(ip):
         try:
@@ -1031,38 +1143,26 @@ def lan_addresses():
         return a.version == 4 and a.is_private and not a.is_loopback and not a.is_link_local
 
     good = [(n, ip) for n, ip in found if private(ip) and not SKIP_IFACES.match(n)]
-    good.sort(key=lambda x: (not x[1].startswith("192.168."), not re.match(r"^(wl|en|eth)", x[0])))
-    return [ip for _, ip in good]
-
-
-def qrencode(text, fmt, *extra, margin=1):
-    """Run qrencode with the data on stdin.
-
-    The pairing link contains the key, and command-line arguments are visible
-    to every user on the machine (/proc/<pid>/cmdline), so it never goes there.
-    """
-    return subprocess.run(["qrencode", "-t", fmt, "-m", str(margin), *extra, "-o", "-"],
-                          input=text.encode(), capture_output=True, timeout=10)
+    good.sort(key=lambda x: (not x[1].startswith("192.168."), not re.match(r"^(wl|en|eth|wi-fi)", x[0])))
+    return list(dict.fromkeys(ip for _, ip in good))
 
 
 def qr_matrix(text):
-    """QR code as rows of '0'/'1' (quiet zone included), for the bar plugin."""
-    if not shutil.which("qrencode"):
-        return []
+    """QR code as rows of '0'/'1' (quiet zone included), for the bar plugin.
+
+    Made in-process (inkcast/qr.py): the link contains the key, and another
+    program's command line would be visible to every user on the machine."""
     try:
-        out = qrencode(text, "ASCII", margin=2).stdout.decode()
-    except (OSError, subprocess.SubprocessError):
+        return qr.matrix(text, border=2)
+    except ValueError:
         return []
-    rows = []
-    for line in out.splitlines():
-        if line:
-            rows.append("".join("1" if line[i] == "#" else "0" for i in range(0, len(line) - 1, 2)))
-    return rows
 
 
 class InkcastServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # On Windows SO_REUSEADDR would let another program bind the same port and
+    # take over connections; bind exclusively there instead.
+    allow_reuse_address = not WINDOWS
     request_queue_size = 16
 
     def __init__(self, host, port, public_host=None):
@@ -1080,6 +1180,11 @@ class InkcastServer(ThreadingHTTPServer):
         self.hub = Hub(self.store, on_change=self._mark_status)
         super().__init__((host, port), Handler)
         threading.Thread(target=self._maintenance, daemon=True).start()
+
+    def server_bind(self):
+        if WINDOWS:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
     # cap concurrent connections so idle sockets can't exhaust threads
     def process_request(self, request, client_address):
@@ -1130,7 +1235,10 @@ class InkcastServer(ThreadingHTTPServer):
             return None
         with self._active_lock:
             expires = self._codes.pop(code, None)
-        launcher_path(code).unlink(missing_ok=True)
+        try:
+            launcher_path(code).unlink(missing_ok=True)
+        except OSError:  # Windows: the browser may still have it open; expiry cleans it up
+            pass
         return self.token if expires and expires > time.monotonic() else None
 
     # status file for the Omarchy bar plugin
@@ -1175,7 +1283,10 @@ class InkcastServer(ThreadingHTTPServer):
                         expired = [c for c, e in self._codes.items() if e <= now]
                         self._codes = {c: e for c, e in self._codes.items() if e > now}
                     for c in expired:
-                        launcher_path(c).unlink(missing_ok=True)
+                        try:
+                            launcher_path(c).unlink(missing_ok=True)
+                        except OSError:
+                            pass
                 if self._status_dirty or tick % 10 == 0:
                     self._status_dirty = False
                     self.write_status()

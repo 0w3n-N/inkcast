@@ -39,6 +39,7 @@ const nextZ = () => Date.now() * 1000 + (zCounter++ % 1000);
 // ---------------------------------------------------------------- network
 
 let liveState = 'idle';
+let views = 0; // share windows open on the computer
 
 function setLive(state) {
   liveState = state;
@@ -54,17 +55,27 @@ const net = connect('pad', {
   },
   message(msg) {
     if (msg.t === 'state') {
+      views = msg.views ?? views;
       setLive(msg.live?.state || 'idle');
       return loadState(msg.doc);
     }
     if (msg.t === 'live') {
+      if (msg.state === 'needs-desktop') {
+        return toast(views > 0
+          ? 'On your computer, click "Choose a window" in the Inkcast window.'
+          : 'Open the Inkcast window on your computer first, then try again.', 5000);
+      }
+      if (msg.state === 'source-stop') return;
       setLive(msg.state === 'error' ? 'idle' : msg.state);
       const text = liveNotice(msg);
       if (text) toast(text, msg.state === 'picking' ? 0 : 3500);
       return;
     }
     if (msg.t === 'theme') return setTheme(msg.v);
-    if (msg.t === 'peers') return;
+    if (msg.t === 'peers') {
+      views = msg.views;
+      return;
+    }
     if (!doc) return;
     const before = doc.page;
     const page = applyOp(doc, idx, msg);

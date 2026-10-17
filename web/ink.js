@@ -98,6 +98,12 @@ export function connect(role, handlers, k) {
       if (ws && ws.readyState === 1) ws.send(s);
       else if (msg.t !== 'cursor') queue.push(s);
     },
+    sendBinary(data) {
+      if (ws && ws.readyState === 1) ws.send(data);
+    },
+    bufferedAmount() {
+      return ws ? ws.bufferedAmount : 0;
+    },
   };
   function open() {
     ws = new WebSocket(url);

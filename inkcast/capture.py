@@ -10,6 +10,8 @@ Needs python-gobject, gstreamer, gst-plugin-pipewire and gst-plugins-good. Impor
 lazily: without them Inkcast works as before and annotation reports what's missing.
 """
 
+from __future__ import annotations
+
 import secrets
 import threading
 import time

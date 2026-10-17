@@ -42,4 +42,4 @@ if [[ -d $DATA_DIR ]] && ask "Delete your saved notebook and pairing key in $DAT
   echo "Deleted $DATA_DIR"
 fi
 
-echo "Done. UxPlay, poppler and qrencode were left installed."
+echo "Done. Installed packages (poppler, UxPlay) were left in place."

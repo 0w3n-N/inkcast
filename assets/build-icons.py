@@ -196,6 +196,10 @@ def main():
                         "-o", str(HERE / f"icon-{size}.png")], check=True)
     subprocess.run(["rsvg-convert", "-w", "180", "-h", "180", str(HERE / "icon.svg"),
                     "-o", str(ROOT / "web" / "icon.png")], check=True)
+    # Windows Start menu shortcut icon.
+    if shutil.which("magick"):
+        subprocess.run(["magick", "-background", "none", str(HERE / "icon.svg"),
+                        "-define", "icon:auto-resize=256,64,48,32,16", str(HERE / "icon.ico")], check=True)
     # The QML glyph uses the same path.
     qml = ROOT / "InkcastIcon.qml"
     if qml.exists():

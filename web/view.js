@@ -3,6 +3,8 @@ import { Surface, applyOp, connect, exportPDF, getKey, indexDoc, keyWorks, liveN
 const $ = (s) => document.querySelector(s);
 const stage = $('#stage');
 
+// `inkcast annotate` on Windows/macOS opens this window with #annotate=1.
+const askToAnnotate = new URLSearchParams(location.hash.slice(1)).get('annotate') === '1';
 const key = await getKey();
 const surface = new Surface(stage, key);
 const setTheme = useTheme(key);
@@ -24,6 +26,8 @@ const MAX_ZOOM = 12;
 let fitted = true;
 let follow = true;
 let liveState = 'idle';
+let captureMode = 'native'; // 'browser' on Windows/macOS: this window captures the window itself
+let source = null; // the window this share window is capturing (browser mode)
 
 function setLive(state) {
   liveState = state;
@@ -48,13 +52,18 @@ const net = connect(
     message(msg) {
       if (msg.t === 'theme') return setTheme(msg.v);
       if (msg.t === 'live') {
+        if (msg.state === 'needs-desktop') return showCapturePrompt();
+        if (msg.state === 'source-stop') return stopSource(false);
         setLive(msg.state === 'error' ? 'idle' : msg.state);
         const text = liveNotice(msg);
         if (text) toast(text, msg.state === 'picking' ? 0 : 3500);
         return;
       }
       if (msg.t === 'state') {
+        captureMode = msg.capture || 'native';
         setLive(msg.live?.state || 'idle');
+        if (source && msg.live?.state === 'live') source.confirmed = true;
+        if (source?.confirmed && msg.live?.state !== 'live') stopSource(false);
         const samePage = doc && curPage()?.id === msg.doc.pages[msg.doc.page]?.id;
         doc = msg.doc;
         idx = indexDoc(doc);
@@ -339,7 +348,118 @@ function togglePair() {
 }
 
 function toggleLive() {
-  net.send({ t: 'live', action: liveState === 'idle' ? 'start' : 'stop' });
+  if (source) return stopSource(true);
+  if (liveState !== 'idle') return net.send({ t: 'live', action: 'stop' });
+  if (captureMode === 'browser') return startSource(); // needs this click for the picker
+  net.send({ t: 'live', action: 'start' });
+}
+
+// ---------------------------------------------------------------- browser window capture
+// Windows and macOS have no screen-share portal Inkcast can use, so this window
+// captures the chosen window with the browser's own picker and streams JPEG
+// frames to the server, which relays them to the iPad.
+
+const MAX_W = 1600;
+const FPS = 15;
+
+function showCapturePrompt() {
+  if (source || captureMode !== 'browser') return;
+  $('#capture-prompt').hidden = false;
+}
+
+async function startSource() {
+  $('#capture-prompt').hidden = true;
+  if (!navigator.mediaDevices?.getDisplayMedia) return toast('This browser cannot capture windows. Use Chrome or Edge.', 5000);
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: 'window', frameRate: { ideal: FPS, max: FPS } },
+      audio: false,
+      selfBrowserSurface: 'exclude',
+      surfaceSwitching: 'exclude',
+    });
+  } catch (e) {
+    return toast(e.name === 'NotAllowedError' ? 'Window sharing cancelled' : 'Could not capture the window: ' + e.message, 4000);
+  }
+  const track = stream.getVideoTracks()[0];
+  const st = track.getSettings();
+  source = { stream, track, w: st.width || 1280, h: st.height || 720, last: 0, busy: false, stopped: false, confirmed: false };
+  track.addEventListener('ended', () => stopSource(true)); // "Stop sharing" in the browser
+  net.send({ t: 'live', action: 'source', w: source.w, h: source.h });
+  pump(source);
+}
+
+async function pump(src) {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const send = async (image, w, h) => {
+    if (!w || !h) return;
+    if (w !== src.w || h !== src.h) {
+      src.w = w;
+      src.h = h;
+      net.send({ t: 'live', action: 'resize', w, h });
+    }
+    const k = Math.min(1, MAX_W / w);
+    const cw = Math.max(2, Math.round(w * k) & ~1), ch = Math.max(2, Math.round(h * k) & ~1);
+    if (canvas.width !== cw || canvas.height !== ch) {
+      canvas.width = cw;
+      canvas.height = ch;
+    }
+    ctx.drawImage(image, 0, 0, cw, ch);
+    const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.72));
+    // Skip frames rather than queue them if the connection is backed up.
+    if (blob && !src.stopped && net.bufferedAmount() < 2_000_000) net.sendBinary(blob);
+  };
+  if ('MediaStreamTrackProcessor' in window) {
+    // Frames arrive as the window changes, even while this window is in the background.
+    const reader = new MediaStreamTrackProcessor({ track: src.track }).readable.getReader();
+    src.reader = reader;
+    while (!src.stopped) {
+      let res;
+      try {
+        res = await reader.read();
+      } catch {
+        break;
+      }
+      if (res.done) break;
+      const frame = res.value;
+      const now = performance.now();
+      if (!src.busy && now - src.last >= 1000 / FPS - 4) {
+        src.last = now;
+        src.busy = true;
+        try {
+          await send(frame, frame.displayWidth, frame.displayHeight);
+        } catch {}
+        src.busy = false;
+      }
+      frame.close();
+    }
+  } else {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = src.stream;
+    await video.play().catch(() => {});
+    src.timer = setInterval(async () => {
+      if (src.busy || src.stopped) return;
+      src.busy = true;
+      try {
+        await send(video, video.videoWidth, video.videoHeight);
+      } catch {}
+      src.busy = false;
+    }, 1000 / FPS);
+  }
+}
+
+function stopSource(notify) {
+  if (!source) return;
+  const src = source;
+  source = null;
+  src.stopped = true;
+  src.reader?.cancel().catch(() => {});
+  clearInterval(src.timer);
+  src.stream.getTracks().forEach((t) => t.stop());
+  if (notify) net.send({ t: 'live', action: 'stop' });
 }
 
 function toggleFollow() {
@@ -366,6 +486,8 @@ $('#b-zoom').onclick = resetZoom;
 $('#b-follow').onclick = toggleFollow;
 $('#b-qr').onclick = togglePair;
 $('#b-live').onclick = toggleLive;
+$('#b-choose').onclick = startSource;
+$('#b-choose-cancel').onclick = () => ($('#capture-prompt').hidden = true);
 $('#b-pdf').onclick = () => $('#file').click();
 $('#b-export').onclick = save;
 $('#b-full').onclick = fullscreen;
@@ -391,6 +513,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === '-' || k === '_') zoomCenter(1 / 1.25);
   else if (k === 'arrowright' || k === 'pagedown' || k === ' ') gotoPage((doc?.page ?? 0) + 1);
   else if (k === 'arrowleft' || k === 'pageup') gotoPage((doc?.page ?? 0) - 1);
+  else if (k === 'escape' && !$('#capture-prompt').hidden) $('#capture-prompt').hidden = true;
   else if (k === 'escape' && !$('#pair').hidden) togglePair();
   else return;
   e.preventDefault();
@@ -439,3 +562,7 @@ function layout() {
 }
 window.addEventListener('resize', layout);
 layout();
+if (askToAnnotate) {
+  captureMode = 'browser';
+  showCapturePrompt();
+}

@@ -10,15 +10,22 @@ your system.
   switched on.
 - The bar widget runs `bin/inkcast` with argument lists, never a shell string,
   and reads status files in `$XDG_RUNTIME_DIR/inkcast/`. It never uses sudo.
-- `scripts/setup` (run by you, in a terminal) asks before each step. It uses
-  sudo only for `pacman`/`yay` package installs, `ufw allow` rules limited to
-  private network ranges and tagged `inkcast`, and
+- `scripts/setup` (Linux, macOS; run by you, in a terminal) asks before each
+  step. It uses sudo only for `pacman`/`yay` package installs, `ufw allow`
+  rules limited to private network ranges and tagged `inkcast`, and
   `systemctl enable --now avahi-daemon`. `scripts/uninstall` removes the rules
   and the optional command and launcher entries.
+- `scripts\setup.ps1` (Windows) asks before each step. It requests admin rights
+  through the normal Windows prompt only to add one firewall rule (inbound
+  TCP 8770, Private networks only, group `Inkcast`) and, if you agree, to mark
+  your network as Private. Python and Poppler come from winget.
+  `scripts\uninstall.ps1` removes the rule, the shortcut and the PATH entry.
 - No code is downloaded at runtime, and there are no bundled binaries or pip
   packages.
 - Data (notebook, PDFs, frozen window frames, pairing key) is stored in
-  `~/.local/share/inkcast/`. The directory is mode 700 and the files are 600.
+  `~/.local/share/inkcast/` (Linux) or `~/Library/Application Support/inkcast/`
+  (macOS), with the directory at mode 700 and files at 600. On Windows it's in
+  `%LOCALAPPDATA%\Inkcast\`, which only your account can read.
 
 ## Whiteboard server (TCP 8770)
 
@@ -38,6 +45,9 @@ your system.
 - **Limits:** 200 MB per upload, 2 MB per message, caps on strokes, points,
   pages and connections, and socket timeouts. PDF rendering runs under CPU and
   memory limits (`prlimit`).
+- **Port:** on Windows the server binds its port exclusively
+  (`SO_EXCLUSIVEADDRUSE`), so another program can't bind the same port
+  alongside it.
 - **Pages** are served with a strict Content-Security-Policy, `nosniff`,
   `no-referrer` and no framing. Static files come from a fixed allowlist.
 - **Not protected:** traffic is plain HTTP, because iPad Safari won't trust a
@@ -48,7 +58,8 @@ your system.
 ## Other users on the same computer
 
 - Secrets are never passed as program arguments, which any user can read in
-  `/proc/<pid>/cmdline`. The QR generator reads the link from standard input.
+  `/proc/<pid>/cmdline`. QR codes are generated inside Inkcast (`inkcast/qr.py`),
+  without running another program.
   The browser is given only the path of an owner-only page, which passes a
   one-time code in the URL fragment. UxPlay reads its PIN from an owner-only
   options file.
@@ -62,10 +73,12 @@ your system.
 
 ## Desktop annotation
 
-- Window capture goes through the standard screen-share portal. A window is
-  only captured after someone at the computer picks it in the share picker. A
-  paired iPad can ask for the picker to open, but can't choose a window
-  itself.
+- On Linux, window capture goes through the standard screen-share portal. On
+  macOS and Windows, the share window captures it with the browser's own
+  screen-share dialog. Either way, a window is only captured after someone at
+  the computer picks it. A paired iPad can ask for the picker, but can't choose
+  a window itself, and browsers only open their dialog after a click on the
+  computer.
 - Frames go only to clients that hold the key. Capture stops when you stop it,
   when you delete its page, or when the window closes. The last frame is saved
   as an owner-only file. Starting a new notebook deletes the saved frames.

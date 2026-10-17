@@ -170,16 +170,17 @@ def ws(path, origin=None, host=None):
     return s, int(buf.split()[1]) if buf else 0
 
 
-def send(s, payload, masked=True):
+def send(s, payload, masked=True, binary=False):
     p = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
     n, m = len(p), os.urandom(4)
     bit = 0x80 if masked else 0
+    op = 0x82 if binary else 0x81
     if n < 126:
-        h = bytes([0x81, bit | n])
+        h = bytes([op, bit | n])
     elif n < 65536:
-        h = bytes([0x81, bit | 126]) + struct.pack("!H", n)
+        h = bytes([op, bit | 126]) + struct.pack("!H", n)
     else:
-        h = bytes([0x81, bit | 127]) + struct.pack("!Q", n)
+        h = bytes([op, bit | 127]) + struct.pack("!Q", n)
     if masked and n:
         p = (int.from_bytes(p, "big") ^ int.from_bytes((m * (n // 4 + 1))[:n], "big")).to_bytes(n, "big")
     s.sendall(h + (m if masked else b"") + p)
@@ -428,6 +429,67 @@ else:
     check("after a restart a live page shows its last frame",
           Hub(srv.store).doc["pages"][0]["bg"] == {"img": "pg1"})
 
+# --------------------------------------------------------------------------- browser capture
+
+print("== desktop annotation through the browser (Windows/macOS)")
+srv.hub._native = False  # as on Windows/macOS: the share window captures
+
+
+def drain(sock, want, timeout=4):
+    """Collect messages until `want(kind, msg)` is true or time runs out."""
+    deadline = time.time() + timeout
+    got = []
+    while time.time() < deadline:
+        try:
+            kind, m = recv_any(sock, max(0.1, deadline - time.time()))
+        except (OSError, ConnectionError):
+            break
+        got.append((kind, m))
+        if want(kind, m):
+            break
+    return got
+
+
+bpad, _ = ws(f"/ws?role=pad&k={KEY}")
+st = recv_until(bpad, "state")
+check("clients are told capture happens in the browser", st.get("capture") == "browser", st.get("capture"))
+share, _ = ws(f"/ws?role=view&k={KEY}")
+recv_until(share, "state")
+send(bpad, {"t": "live", "action": "start"})
+m = recv_until(share, "live")
+check("an iPad start asks the share window for a click", m.get("state") == "needs-desktop", m)
+send(bpad, {"t": "live", "action": "source", "w": 800, "h": 500})
+time.sleep(0.4)
+check("the iPad can't make itself the capture source", srv.hub.source is None)
+send(share, {"t": "live", "action": "source", "w": 800, "h": 500})
+got = drain(bpad, lambda k, m: k == "text" and m.get("t") == "live" and m.get("state") == "live")
+check("a share window becomes the source and the page goes live",
+      srv.hub.source is not None and any(k == "text" and m.get("state") == "live" for k, m in got))
+jpeg = jpeg_frames(320, 200, 1)[0] if HAVE_GST else b"\xff\xd8\xff\xe0" + b"\0" * 64 + b"\xff\xd9"
+send(share, jpeg, binary=True)
+got = drain(bpad, lambda k, m: k == "binary")
+check("its JPEG frames reach the iPad", any(k == "binary" and m == jpeg for k, m in got))
+send(share, b"<script>alert(1)</script>", binary=True)
+got = drain(bpad, lambda k, m: k == "binary", timeout=1)
+check("non-JPEG data is not relayed", not any(k == "binary" for k, m in got))
+other, _ = ws(f"/ws?role=view&k={KEY}")
+recv_until(other, "state")
+send(other, {"t": "live", "action": "source", "w": 640, "h": 480})
+m = recv_until(other, "live")
+check("a second source is refused", m.get("state") == "error", m)
+send(share, {"t": "live", "action": "resize", "w": 1000, "h": 500})
+time.sleep(0.4)
+live_page = srv.hub.pages.get(srv.hub.live["page"])
+check("the source can report a new window size", live_page and live_page["h"] == 500.0, live_page and live_page["h"])
+pid_live = srv.hub.live["page"]
+share.close()
+got = drain(bpad, lambda k, m: k == "text" and m.get("t") == "live" and m.get("state") == "idle")
+end = [m for k, m in got if k == "text" and m.get("t") == "live" and m.get("state") == "idle"]
+check("closing the share window ends capture", end and end[0].get("reason") == "closed", end)
+time.sleep(0.3)
+check("and the page keeps the last frame", srv.hub.pages[pid_live]["bg"] == {"img": pid_live})
+srv.hub._native = None
+
 # --------------------------------------------------------------------------- impostor servers
 
 print("== the CLI only gives the key to the real server")
@@ -533,8 +595,8 @@ try:
 finally:
     subprocess.run, subprocess.Popen = real_run, real_popen
     cli.sys.stdout = real_stdout
-qr_calls = [a for a in argvs if a and a[0] == "qrencode"]
-check("qrencode ran (status, SVG and terminal QR)", len(qr_calls) >= 3, len(qr_calls))
+check("QR codes are made in-process (no helper program sees the link)",
+      not any(a and "qrencode" in a[0] for a in argvs))
 check("the key never appears in a process's arguments", not any(KEY in " ".join(a) for a in argvs))
 check("the browser gets a file path, not a URL with a code",
       len(opened) == 1 and opened[0].startswith("file://") and "c=" not in opened[0] and KEY not in opened[0], opened)

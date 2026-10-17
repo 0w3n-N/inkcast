@@ -1,5 +1,7 @@
 """inkcast command line."""
 
+from __future__ import annotations
+
 import argparse
 import hmac
 import ipaddress
@@ -21,6 +23,7 @@ from . import __version__
 from .server import data_dir, ping_proof, private_dir, runtime_dir, write_private
 
 IS_MAC = sys.platform == "darwin"
+IS_WINDOWS = os.name == "nt"
 
 
 def default_port():
@@ -51,6 +54,8 @@ def host_arg(value):
 
 
 def log_dir() -> Path:
+    if IS_WINDOWS:
+        return private_dir(data_dir() / "logs")
     if IS_MAC:
         return private_dir(Path(os.path.expanduser("~/Library/Logs/inkcast")))
     base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
@@ -127,16 +132,33 @@ def print_pad_urls(port):
 
 
 def print_qr(url):
-    """Print a QR code in the terminal. The link carries the key, so it goes to
-    qrencode on stdin, never on the command line where other users can read it."""
-    if shutil.which("qrencode"):
-        from .server import qrencode
-        sys.stdout.buffer.write(qrencode(url, "ANSIUTF8", margin=2).stdout)
-        sys.stdout.flush()
+    """Print the pairing QR code in the terminal (made in-process, see qr.py)."""
+    from . import qr
+
+    try:
+        sys.stdout.write(qr.terminal(url))
+    except UnicodeEncodeError:  # a terminal that can't show block characters
+        print("(QR code not shown: this terminal can't display it)")
+    sys.stdout.flush()
+
+
+def windows_browsers():
+    """Chromium-based browsers on Windows (Edge ships with Windows 11)."""
+    roots = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")]
+    rel = (r"Google\Chrome\Application\chrome.exe", r"Microsoft\Edge\Application\msedge.exe",
+           r"BraveSoftware\Brave-Browser\Application\brave.exe", r"Chromium\Application\chrome.exe")
+    return [str(Path(r) / p) for p in rel for r in roots if r and (Path(r) / p).is_file()]
 
 
 def open_window(url):
     """Open the viewer as a chrome-less app window (screen-share friendly)."""
+    if IS_WINDOWS:
+        for exe in windows_browsers():
+            subprocess.Popen([exe, f"--app={url}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             creationflags=0x00000008)  # DETACHED_PROCESS
+            return
+        os.startfile(url)  # default browser, as a normal tab
+        return
     quiet = {"start_new_session": True, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if shutil.which("omarchy-launch-webapp"):
         subprocess.Popen(["omarchy-launch-webapp", url], **quiet)
@@ -166,10 +188,11 @@ def start_background(args):
     if args.host:
         cmd += ["--host", args.host]
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parent.parent)}
+    # Detach so the server outlives this command (and, on Windows, the console).
+    detach = {"creationflags": 0x08000000 | 0x00000200} if IS_WINDOWS else {"start_new_session": True}
     fd = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     with os.fdopen(fd, "ab") as f:
-        subprocess.Popen(cmd, stdout=f, stderr=f, stdin=subprocess.DEVNULL,
-                         start_new_session=True, env=env)
+        subprocess.Popen(cmd, stdout=f, stderr=f, stdin=subprocess.DEVNULL, env=env, **detach)
     for _ in range(80):
         if ping(args.port):
             return True
@@ -213,7 +236,7 @@ def cmd_start(args):
         sys.exit(1)
 
 
-def cmd_open(args):
+def cmd_open(args, extra=""):
     if not start_background(args):
         sys.exit(1)
     code = request(args.port, "/api/launch", "POST")["c"]
@@ -222,7 +245,7 @@ def cmd_open(args):
     # URL fragment (#c=...), which never reaches a command line or server log.
     # The server deletes the page once the code is used or expires.
     from .server import launcher_path, write_private
-    target = local(args.port, f"/view#c={code}")
+    target = local(args.port, f"/view#c={code}{extra}")
     page = launcher_path(code)
     write_private(page, '<!doctype html><meta charset="utf-8"><title>Inkcast</title>'
                         f'<meta http-equiv="refresh" content="0;url={target}">')
@@ -237,9 +260,13 @@ def cmd_annotate(args):
         return
     from .capture import missing_dependencies
 
-    missing = missing_dependencies()
-    if missing:
-        sys.exit("Window capture needs: " + " ".join(missing) + "  (run scripts/setup)")
+    if not sys.platform.startswith("linux") or missing_dependencies():
+        # Windows/macOS (or Linux without the GStreamer stack): the share window
+        # captures the window through the browser, which needs a click there.
+        cmd_open(args, "&annotate=1")
+        if sys.stdout.isatty():
+            print('In the Inkcast window, click "Choose a window" and pick the window to show on the iPad.')
+        return
     if not start_background(args):
         sys.exit(1)
     request(args.port, "/api/live", "POST", timeout=10, body={"action": "start"})
@@ -293,6 +320,8 @@ def cmd_mirror(args):
     """AirPlay screen mirroring via UxPlay."""
     if IS_MAC:
         sys.exit("macOS has a built-in AirPlay receiver: System Settings > General > AirDrop & Handoff > AirPlay Receiver.")
+    if IS_WINDOWS:
+        sys.exit("AirPlay mirroring isn't supported on Windows. The whiteboard, PDFs and window annotation all work.")
     if not shutil.which("uxplay"):
         sys.exit("UxPlay is not installed. Run the setup: scripts/setup  (or: omarchy pkg aur add uxplay)")
     if shutil.which("systemctl") and subprocess.run(["systemctl", "is-active", "--quiet", "avahi-daemon"]).returncode != 0:
@@ -338,7 +367,11 @@ def cmd_doctor(args):
 
     ufw_active = active("ufw") if shutil.which("ufw") else False
     marker = data_dir() / "firewall"
-    if not ufw_active:
+    if IS_WINDOWS:
+        firewall = "configured" if marker.exists() else "windows"
+    elif IS_MAC:
+        firewall = "macos"  # the system asks to allow incoming connections
+    elif not ufw_active:
         firewall = "open"  # no firewall in the way
     elif marker.exists():
         firewall = "configured"
@@ -347,15 +380,18 @@ def cmd_doctor(args):
     from .capture import missing_dependencies
 
     lan = lan_addresses()
-    capture_missing = missing_dependencies() if not IS_MAC else ["(Linux only)"]
+    linux = sys.platform.startswith("linux")
+    capture_missing = missing_dependencies() if linux else []
     report = {
         "version": __version__,
         "python": sys.version.split()[0],
+        "os": "windows" if IS_WINDOWS else "macos" if IS_MAC else "linux",
         "poppler": bool(shutil.which("pdftoppm") and shutil.which("pdfinfo")),
-        "qrencode": bool(shutil.which("qrencode")),
         "uxplay": bool(shutil.which("uxplay")),
+        # Linux captures through the portal; elsewhere the share window does it in the browser.
         "capture": not capture_missing,
-        "avahi": bool(active("avahi-daemon")) if not IS_MAC else True,
+        "capture_mode": "native" if linux and not capture_missing else "browser",
+        "avahi": bool(active("avahi-daemon")) if linux else True,
         "firewall": firewall,
         "lan": lan[0] if lan else "",
     }
@@ -363,16 +399,28 @@ def cmd_doctor(args):
         print(json.dumps(report))
         return
     ok = lambda b: "ok" if b else "missing"
-    print(f"inkcast {report['version']} (python {report['python']})")
+    setup = r"scripts\setup.ps1" if IS_WINDOWS else "scripts/setup"
+    print(f"inkcast {report['version']} (python {report['python']}, {report['os']})")
     print(f"  PDF support (poppler)   {ok(report['poppler'])}")
-    print(f"  QR codes (qrencode)     {ok(report['qrencode'])}")
-    print(f"  AirPlay (uxplay)        {ok(report['uxplay'])}")
-    print(f"  Window capture          {'ok' if report['capture'] else 'missing ' + ' '.join(capture_missing)}")
-    print(f"  Discovery (avahi)       {ok(report['avahi'])}")
-    print(f"  Firewall                {report['firewall']}")
-    print(f"  Network address         {report['lan'] or 'none'}")
-    if not all([report["poppler"], report["qrencode"]]) or firewall == "needs-setup":
-        print("\nRun scripts/setup to fix what's missing (it asks before each step).")
+    if report["capture_mode"] == "native":
+        print("  Window annotation       ok (system window picker)")
+    else:
+        print("  Window annotation       via Chrome/Edge (click Window in the Inkcast window)")
+    if linux:
+        print(f"  AirPlay (uxplay)        {ok(report['uxplay'])}")
+        print(f"  Discovery (avahi)       {ok(report['avahi'])}")
+    elif IS_MAC:
+        print("  AirPlay                 built into macOS (System Settings > AirPlay Receiver)")
+    else:
+        print("  AirPlay                 not supported on Windows")
+    notes = {"open": "no firewall in the way", "configured": "rule added by setup",
+             "needs-setup": "ufw may block the iPad (run setup)",
+             "windows": "allow Python on private networks when Windows asks, or run setup",
+             "macos": "allow incoming connections for Python if macOS asks"}
+    print(f"  Firewall                {notes.get(firewall, firewall)}")
+    print(f"  Network address         {report['lan'] or 'none (connect to Wi-Fi or Ethernet)'}")
+    if not report["poppler"] or firewall in ("needs-setup", "windows"):
+        print(f"\nRun {setup} to fix what's missing (it asks before each step).")
 
 
 def user_uxplayrc():

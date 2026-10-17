@@ -1,0 +1,46 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux (full suite)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y poppler-utils python3-gi gir1.2-gstreamer-1.0 \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+      - name: Security, protocol and annotation tests
+        run: /usr/bin/python3 -B tests/run.py
+      - name: Smoke test
+        run: /usr/bin/python3 -B tests/smoke.py
+
+  smoke:
+    name: ${{ matrix.os }}, Python ${{ matrix.python }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Smoke test
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -B tests/smoke.py
+      - name: Setup script syntax (macOS)
+        if: runner.os == 'macOS'
+        run: bash -n scripts/setup && bash -n scripts/uninstall

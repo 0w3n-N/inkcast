@@ -50,14 +50,13 @@ function parseStatus(raw, nowSec) {
 
 // `inkcast doctor --json`.
 function parseDoctor(raw) {
-  var d = { known: false, uxplay: false, poppler: false, qrencode: false, avahi: false, capture: false, firewall: "unknown", lan: "" }
+  var d = { known: false, uxplay: false, poppler: false, avahi: false, capture: false, firewall: "unknown", lan: "" }
   if (typeof raw !== "string" || raw.length > 10000) return d
   try {
     var j = JSON.parse(raw)
     d.known = true
     d.uxplay = j.uxplay === true
     d.poppler = j.poppler === true
-    d.qrencode = j.qrencode === true
     d.avahi = j.avahi === true
     d.capture = j.capture === true
     d.firewall = ["open", "configured", "needs-setup"].indexOf(j.firewall) >= 0 ? j.firewall : "unknown"
@@ -67,7 +66,7 @@ function parseDoctor(raw) {
 }
 
 function needsSetup(d) {
-  return d.known && (!d.poppler || !d.qrencode || !d.capture || d.firewall === "needs-setup")
+  return d.known && (!d.poppler || !d.capture || d.firewall === "needs-setup")
 }
 
 function statusLine(st, mirroring) {

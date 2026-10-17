@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.0w3n-n.inkcast",
   "name": "Inkcast",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "0w3n-N",
   "license": "MIT",
   "description": "Use an iPad and Apple Pencil as a drawing tablet: write on paper, PDFs or a live view of any desktop window, and share it in a window. Optional AirPlay mirroring. Local network only.",

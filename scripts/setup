@@ -2,7 +2,7 @@
 # Inkcast setup. Every step explains itself and asks first; nothing changes
 # unless you answer yes. Safe to run again at any time.
 #
-#   1. Install helpers: poppler (PDFs) and qrencode (pairing QR code)
+#   1. Install helpers: poppler (PDFs) and the window-capture packages
 #   2. Optional AirPlay mirroring: UxPlay (AUR) and avahi-daemon (discovery)
 #   3. Open the firewall (ufw) for private home/office networks only
 #   4. Optional: an `inkcast` command and app-launcher entries
@@ -45,7 +45,7 @@ echo "Inkcast setup. Each step asks before changing anything."
 
 if [[ "$(uname)" == "Darwin" ]]; then
   bold "macOS"
-  have pdftoppm && have qrencode || echo "For PDFs and the pairing QR code, run: brew install poppler qrencode"
+  have pdftoppm || echo "For writing on PDFs, run: brew install poppler"
   echo "For screen mirroring, use the built-in AirPlay Receiver:"
   echo "System Settings > General > AirDrop & Handoff > AirPlay Receiver."
   if ask "Add the 'inkcast' command to $BIN_DIR?"; then
@@ -58,17 +58,20 @@ fi
 
 # --------------------------------------------------------------------- 1. helpers
 
+# Packages are only installed automatically on Arch/Omarchy; other
+# distributions get the command to run (see the README for package names).
 install_pkgs() {
   if have omarchy; then
     omarchy pkg add "$@"
-  else
+  elif have pacman; then
     sudo pacman -S --needed "$@"
+  else
+    echo "Install these with your package manager (Debian/Ubuntu and Fedora names are in the README): $*"
   fi
 }
 
 missing=()
 have pdftoppm && have pdfinfo || missing+=(poppler)
-have qrencode || missing+=(qrencode)
 # Desktop annotation (window capture through the screen-share portal).
 for pkg in $(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); from inkcast.capture import missing_dependencies as m; print(" ".join(m()))' "$ROOT" 2>/dev/null); do
   missing+=("$pkg")
@@ -76,12 +79,12 @@ done
 bold "1. Helpers"
 if ((${#missing[@]})); then
   echo "Missing: ${missing[*]}"
-  echo "(poppler opens PDFs, qrencode draws the pairing QR code, the GStreamer/GObject packages capture windows for desktop annotation)"
+  echo "(poppler opens PDFs; the GStreamer/GObject packages capture windows for desktop annotation)"
   if ask "Install ${missing[*]} from the Arch repositories?"; then
     install_pkgs "${missing[@]}"
   fi
 else
-  echo "poppler and qrencode are installed."
+  echo "Everything needed is installed."
 fi
 
 # --------------------------------------------------------------------- 2. AirPlay
@@ -94,8 +97,10 @@ elif ask "Install UxPlay so the iPad can mirror its whole screen over AirPlay? (
     omarchy pkg aur add uxplay
   elif have yay; then
     yay -S --needed uxplay
-  else
+  elif have pacman; then
     echo "Install the 'uxplay' package from the AUR with your AUR helper, then run this again."
+  else
+    echo "Install the 'uxplay' package with your package manager (apt install uxplay, dnf install uxplay), then run this again."
   fi
 fi
 if have uxplay && have systemctl && ! systemctl is-active --quiet avahi-daemon; then
