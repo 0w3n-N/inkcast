@@ -16,7 +16,7 @@ function toInt(value, lo, hi, fallback) {
 
 // status.json written by the server (see inkcast/server.py write_status).
 function parseStatus(raw, nowSec) {
-  var empty = { running: false, pads: 0, views: 0, url: "", qr: [], qrSize: 0, page: 0, pages: 0, port: 0 }
+  var empty = { running: false, pads: 0, views: 0, url: "", qr: [], qrSize: 0, page: 0, pages: 0, port: 0, live: "idle" }
   if (typeof raw !== "string" || raw.length === 0 || raw.length > 200000) return empty
   var s
   try { s = JSON.parse(raw) } catch (e) { return empty }
@@ -43,13 +43,14 @@ function parseStatus(raw, nowSec) {
     qrSize: qr.length,
     page: toInt(s.page, 0, 100000, 0),
     pages: toInt(s.pages, 0, 100000, 0),
-    port: toInt(s.port, 0, 65535, 0)
+    port: toInt(s.port, 0, 65535, 0),
+    live: s.running === true && fresh && (s.live === "picking" || s.live === "live") ? s.live : "idle"
   }
 }
 
 // `inkcast doctor --json`.
 function parseDoctor(raw) {
-  var d = { known: false, uxplay: false, poppler: false, qrencode: false, avahi: false, firewall: "unknown", lan: "" }
+  var d = { known: false, uxplay: false, poppler: false, qrencode: false, avahi: false, capture: false, firewall: "unknown", lan: "" }
   if (typeof raw !== "string" || raw.length > 10000) return d
   try {
     var j = JSON.parse(raw)
@@ -58,6 +59,7 @@ function parseDoctor(raw) {
     d.poppler = j.poppler === true
     d.qrencode = j.qrencode === true
     d.avahi = j.avahi === true
+    d.capture = j.capture === true
     d.firewall = ["open", "configured", "needs-setup"].indexOf(j.firewall) >= 0 ? j.firewall : "unknown"
     d.lan = singleLine(j.lan, 64)
   } catch (e) {}
@@ -65,7 +67,7 @@ function parseDoctor(raw) {
 }
 
 function needsSetup(d) {
-  return d.known && (!d.poppler || !d.qrencode || d.firewall === "needs-setup")
+  return d.known && (!d.poppler || !d.qrencode || !d.capture || d.firewall === "needs-setup")
 }
 
 function statusLine(st, mirroring) {

@@ -71,6 +71,18 @@ export function useTheme(key) {
   return set;
 }
 
+// What to tell the user about desktop annotation (the "live" message).
+export function liveNotice(msg) {
+  if (msg.state === 'picking') return 'Choose the window in the picker on your computer…';
+  if (msg.state === 'live') return 'The window is live. Draw on it.';
+  if (msg.state === 'error') return msg.error || 'Window capture failed';
+  if (msg.reason === 'cancelled') return 'Window sharing cancelled';
+  if (msg.reason === 'closed') return 'The window closed. Its last frame stays on the page.';
+  if (msg.reason === 'stopped') return 'Stopped. The last frame stays on the page.';
+  if (msg.reason === 'error') return msg.error || 'Window capture stopped';
+  return '';
+}
+
 // ---------------------------------------------------------------- connection
 
 export function connect(role, handlers, k) {
@@ -89,12 +101,14 @@ export function connect(role, handlers, k) {
   };
   function open() {
     ws = new WebSocket(url);
+    ws.binaryType = 'blob';
     ws.onopen = () => {
       retry = 250;
       api.connected = true;
       handlers.status?.(true);
     };
     ws.onmessage = (e) => {
+      if (typeof e.data !== 'string') return handlers.frame?.(e.data); // live window frame (JPEG)
       const msg = JSON.parse(e.data);
       handlers.message(msg);
       // Flush only after the fresh state arrived, so queued ops apply on top of it.
@@ -191,7 +205,7 @@ export function strokeHit(s, x, y, r) {
 
 export function drawPaper(ctx, page, k) {
   const w = page.w * k, h = page.h * k;
-  ctx.fillStyle = '#ffffff';
+  ctx.fillStyle = page.bg?.live ? '#000000' : '#ffffff';
   ctx.fillRect(0, 0, w, h);
   const kind = page.paper || 'blank';
   if (kind === 'blank' || page.bg) return;
@@ -228,8 +242,10 @@ export function drawPaper(ctx, page, k) {
 
 const imgCache = new Map();
 export function pageImageURL(page, key) {
-  if (!page.bg) return null;
-  return `/api/pdf/${page.bg.pdf}/${page.bg.n}.png${key ? `?k=${encodeURIComponent(key)}` : ''}`;
+  const q = key ? `?k=${encodeURIComponent(key)}` : '';
+  if (page.bg?.pdf) return `/api/pdf/${page.bg.pdf}/${page.bg.n}.png${q}`;
+  if (page.bg?.img) return `/api/img/${page.bg.img}.jpg${q}`;
+  return null; // blank paper, or a live window (drawn from the video layer)
 }
 export function loadImage(url, onload) {
   if (!url) return null;
@@ -251,12 +267,14 @@ export function loadImage(url, onload) {
 
 // ---------------------------------------------------------------- surface
 
-// Three stacked canvases: paper/PDF, committed ink, and in-progress strokes.
+// Stacked canvases: paper/PDF, live window video, committed ink, and
+// in-progress strokes.
 export class Surface {
   constructor(root, key) {
     this.root = root;
     this.key = key;
     this.bg = this.#canvas();
+    this.media = this.#canvas();
     this.ink = this.#canvas();
     this.live = this.#canvas();
     this.page = null;
@@ -264,6 +282,10 @@ export class Surface {
     this.view = { s: 1, x: 0, y: 0 }; // page unit -> css px
     this.dpr = 1;
     this.liveQueued = false;
+    this.frame = null; // latest live-window frame (ImageBitmap)
+    this.decoding = false;
+    this.nextBlob = null;
+    this.mediaQueued = false;
   }
   #canvas() {
     const c = document.createElement('canvas');
@@ -275,7 +297,7 @@ export class Surface {
     const r = this.root.getBoundingClientRect();
     this.cw = r.width;
     this.ch = r.height;
-    for (const c of [this.bg, this.ink, this.live]) {
+    for (const c of [this.bg, this.media, this.ink, this.live]) {
       c.width = Math.round(r.width * this.dpr);
       c.height = Math.round(r.height * this.dpr);
       c.style.width = r.width + 'px';
@@ -304,8 +326,47 @@ export class Surface {
   }
   redraw() {
     this.drawBg();
+    this.drawMedia();
     this.drawInk();
     this.drawLive();
+  }
+  // A new JPEG frame of the live window. If decoding falls behind, only the
+  // newest frame is kept.
+  pushFrame(blob) {
+    if (this.decoding) {
+      this.nextBlob = blob;
+      return;
+    }
+    this.decoding = true;
+    createImageBitmap(blob)
+      .then((bmp) => {
+        this.frame?.close?.();
+        this.frame = bmp;
+        this.queueMedia();
+      })
+      .catch(() => {})
+      .finally(() => {
+        this.decoding = false;
+        const next = this.nextBlob;
+        this.nextBlob = null;
+        if (next) this.pushFrame(next);
+      });
+  }
+  queueMedia() {
+    if (this.mediaQueued) return;
+    this.mediaQueued = true;
+    requestAnimationFrame(() => {
+      this.mediaQueued = false;
+      this.drawMedia();
+    });
+  }
+  drawMedia() {
+    const ctx = this.#prep(this.media);
+    const page = this.page;
+    if (!page?.bg?.live || !this.frame) return;
+    const k = this.view.s;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(this.frame, 0, 0, page.w * k, page.h * k);
   }
   drawBg() {
     const page = this.page;
@@ -314,7 +375,7 @@ export class Surface {
     const k = this.view.s;
     ctx.shadowColor = 'rgba(0,0,0,0.35)';
     ctx.shadowBlur = 18;
-    ctx.fillStyle = '#fff';
+    ctx.fillStyle = page.bg?.live ? '#000' : '#fff';
     ctx.fillRect(0, 0, page.w * k, page.h * k);
     ctx.shadowColor = 'transparent';
     drawPaper(ctx, page, k);
@@ -415,10 +476,16 @@ async function renderPageJPEG(page, key, px = 1800) {
   c.height = Math.round(page.h * k);
   const ctx = c.getContext('2d');
   drawPaper(ctx, page, k);
-  const url = pageImageURL(page, key);
+  // A live window exports its current frame.
+  const url = page.bg?.live
+    ? `/api/live/frame.jpg?k=${encodeURIComponent(key)}&t=${Date.now()}`
+    : pageImageURL(page, key);
   if (url) {
-    const img = loadImage(url) || (await new Promise((res) => loadImage(url, () => res(loadImage(url)))));
-    ctx.drawImage(img, 0, 0, c.width, c.height);
+    const img = loadImage(url) || (await new Promise((res) => {
+      loadImage(url, () => res(loadImage(url)));
+      setTimeout(() => res(null), 8000); // e.g. no frame yet
+    }));
+    if (img) ctx.drawImage(img, 0, 0, c.width, c.height);
   }
   for (const s of page.strokes) drawStroke(ctx, s, k);
   const blob = await new Promise((res) => c.toBlob(res, 'image/jpeg', 0.9));

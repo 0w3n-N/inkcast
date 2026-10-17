@@ -1,4 +1,4 @@
-import { COLORS, Surface, applyOp, connect, exportPDF, indexDoc, keyWorks, showLocked, strokeHit, uploadPDF, useTheme } from '/ink.js';
+import { COLORS, Surface, applyOp, connect, exportPDF, indexDoc, keyWorks, liveNotice, showLocked, strokeHit, uploadPDF, useTheme } from '/ink.js';
 
 const $ = (s) => document.querySelector(s);
 const stage = $('#stage');
@@ -38,12 +38,31 @@ const nextZ = () => Date.now() * 1000 + (zCounter++ % 1000);
 
 // ---------------------------------------------------------------- network
 
+let liveState = 'idle';
+
+function setLive(state) {
+  liveState = state;
+  $('#livebtn').textContent = state === 'idle' ? 'Annotate a desktop window…' : 'Stop the live window';
+}
+
 const net = connect('pad', {
   status(ok) {
     $('#dot').className = ok ? 'ok' : 'bad';
   },
+  frame(blob) {
+    surface.pushFrame(blob);
+  },
   message(msg) {
-    if (msg.t === 'state') return loadState(msg.doc);
+    if (msg.t === 'state') {
+      setLive(msg.live?.state || 'idle');
+      return loadState(msg.doc);
+    }
+    if (msg.t === 'live') {
+      setLive(msg.state === 'error' ? 'idle' : msg.state);
+      const text = liveNotice(msg);
+      if (text) toast(text, msg.state === 'picking' ? 0 : 3500);
+      return;
+    }
     if (msg.t === 'theme') return setTheme(msg.v);
     if (msg.t === 'peers') return;
     if (!doc) return;
@@ -497,6 +516,10 @@ $('#file').onchange = async (e) => {
   } catch (err) {
     toast(err.message, 5000);
   }
+};
+$('#livebtn').onclick = () => {
+  closeMenu();
+  net.send({ t: 'live', action: liveState === 'idle' ? 'start' : 'stop' });
 };
 $('#newdoc').onclick = () => {
   closeMenu();

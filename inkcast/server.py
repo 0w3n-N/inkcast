@@ -193,12 +193,7 @@ def clean_page(p):
     h = num(p.get("h"), 10, 100000)
     if h is None:
         return None
-    bg = p.get("bg")
-    if isinstance(bg, dict) and isinstance(bg.get("pdf"), str) and REV_RE.match(bg["pdf"]) \
-            and isinstance(bg.get("n"), int) and not isinstance(bg.get("n"), bool) and 1 <= bg["n"] <= 100000:
-        bg = {"pdf": bg["pdf"], "n": bg["n"]}
-    else:
-        bg = None
+    bg = clean_bg(p.get("bg"))
     pt = p.get("pt") if isinstance(p.get("pt"), list) and len(p.get("pt")) == 2 else [960, 540]
     pt = [num(pt[0], 1, 1e5) or 960, num(pt[1], 1, 1e5) or 540]
     strokes = []
@@ -210,6 +205,20 @@ def clean_page(p):
             strokes.append(c)
     return {"id": p["id"], "w": PAGE_W, "h": h, "paper": p.get("paper") if p.get("paper") in PAPERS else "blank",
             "bg": bg, "pt": pt, "strokes": strokes}
+
+
+def clean_bg(bg):
+    """A page background: a PDF page, a frozen window frame, or the live window."""
+    if not isinstance(bg, dict):
+        return None
+    if isinstance(bg.get("pdf"), str) and REV_RE.match(bg["pdf"]) \
+            and isinstance(bg.get("n"), int) and not isinstance(bg.get("n"), bool) and 1 <= bg["n"] <= 100000:
+        return {"pdf": bg["pdf"], "n": bg["n"]}
+    if clean_id(bg.get("img")):
+        return {"img": bg["img"]}
+    if bg.get("live") is True:
+        return {"live": True}
+    return None
 
 
 def clean_doc(doc):
@@ -275,6 +284,11 @@ class WSConn:
             self.close()
             return
         self.out.put(self._frame(0x1, json.dumps(obj, separators=(",", ":")).encode()))
+
+    def send_binary(self, data: bytes):
+        """Send a video frame, or drop it if this client is still busy with older ones."""
+        if self.alive and self.out.qsize() <= 2:
+            self.out.put(self._frame(0x2, data))
 
     def ping(self):
         if self.alive:
@@ -346,12 +360,19 @@ class Hub:
         self.doc = self._load()
         self._index()
         self._dirty = False
+        self.live = {"state": "idle", "page": None}
+        self.capture = None
+        self.frame = None
 
     # persistence
     def _load(self):
         try:
             doc = clean_doc(json.loads((self.store / "session.json").read_text()))
             if doc:
+                # A window that was live when the server stopped keeps its last frame.
+                for p in doc["pages"]:
+                    if p["bg"] and p["bg"].get("live"):
+                        p["bg"] = {"img": p["id"]} if (self.store / f"img-{p['id']}.jpg").exists() else None
                 return doc
         except (OSError, ValueError, RecursionError):
             pass
@@ -382,7 +403,9 @@ class Hub:
             if len(self.conns) >= MAX_WS_CLIENTS:
                 return False
             self.conns.append(conn)
-            conn.send({"t": "state", "doc": self.doc, "you": conn.id, **self.peers()})
+            conn.send({"t": "state", "doc": self.doc, "live": self.live, "you": conn.id, **self.peers()})
+            if self.frame and self.live["state"] == "live":
+                conn.send_binary(self.frame)
             self.broadcast({"t": "peers", **self.peers()})
         self.on_change()
         return True
@@ -408,7 +431,7 @@ class Hub:
 
     def send_state(self):
         with self.lock:
-            msg = {"t": "state", "doc": self.doc, **self.peers()}
+            msg = {"t": "state", "doc": self.doc, "live": self.live, **self.peers()}
             for c in list(self.conns):
                 c.send({**msg, "you": c.id})
         self.on_change()
@@ -482,6 +505,13 @@ class Hub:
                 out["from"] = conn.id
                 self.broadcast(out, skip=conn)
                 return  # ephemeral: not stored
+            elif t == "live":
+                action = msg.get("action")
+                if action == "start":
+                    self.live_start()
+                elif action == "stop":
+                    self.live_stop()
+                return
             elif t == "addpage":
                 if len(self.doc["pages"]) >= MAX_PAGES:
                     return
@@ -495,6 +525,8 @@ class Hub:
                 return
             elif t == "delpage":
                 if len(self.doc["pages"]) > 1 and page:
+                    if page["id"] == self.live["page"]:
+                        self.live_stop()
                     self.doc["pages"].remove(page)
                     self.doc["page"] = min(self.doc["page"], len(self.doc["pages"]) - 1)
                     self._index()
@@ -502,9 +534,11 @@ class Hub:
                     self.send_state()
                 return
             elif t == "newdoc":
+                self.live_stop()
                 self.doc = blank_doc()
                 self._index()
                 self.touch()
+                self.gc_images()
                 self.send_state()
                 return
             if out is None:
@@ -515,7 +549,100 @@ class Hub:
         if t in ("goto",):
             self.on_change()
 
+    # ------------------------------------------------------------- desktop annotation
+
+    def live_start(self):
+        """Ask the desktop to pick a window; it becomes a live page when chosen."""
+        from .capture import WindowCapture, missing_dependencies
+
+        with self.lock:
+            if self.capture:
+                return
+            missing = missing_dependencies()
+            if missing:
+                self.broadcast({"t": "live", "state": "error",
+                                "error": "Window capture needs " + ", ".join(missing) + ". Run setup on the computer."})
+                return
+            self.live = {"state": "picking", "page": None}
+            self.capture = WindowCapture(self._live_started, self._live_frame, self._live_resized, self._live_ended)
+            self.capture.start()
+        self.broadcast({"t": "live", "state": "picking"})
+        self.on_change()
+
+    def live_stop(self, wait=0.0):
+        with self.lock:
+            cap = self.capture
+        if cap:
+            cap.stop()
+            if wait:
+                cap.thread.join(wait)  # let it save the last frame
+
+    def _live_started(self, w, h):
+        with self.lock:
+            if len(self.doc["pages"]) >= MAX_PAGES:
+                self.live_stop()
+                return
+            p = blank_page(h / w, "blank", (w * 0.75, h * 0.75))
+            p["bg"] = {"live": True}
+            i = self.doc["page"] + 1
+            self.doc["pages"].insert(i, p)
+            self.doc["page"] = i
+            self.live = {"state": "live", "page": p["id"]}
+            self._index()
+            self.touch()
+        self.send_state()
+        self.broadcast({"t": "live", "state": "live"})
+        self.on_change()
+
+    def _live_frame(self, jpeg):
+        self.frame = jpeg
+        for c in list(self.conns):
+            c.send_binary(jpeg)
+
+    def _live_resized(self, w, h):
+        with self.lock:
+            page = self.pages.get(self.live["page"])
+            if not page:
+                return
+            page["h"] = round(PAGE_W * h / w, 2)
+            page["pt"] = [round(w * 0.75, 2), round(h * 0.75, 2)]
+            self.touch()
+        self.send_state()
+
+    def _live_ended(self, reason):
+        with self.lock:
+            page = self.pages.get(self.live["page"])
+            if page:
+                if self.frame:
+                    write_private(self.store / f"img-{page['id']}.jpg", self.frame)
+                    page["bg"] = {"img": page["id"]}
+                else:
+                    page["bg"] = None
+                self.touch()
+            self.capture = None
+            self.frame = None
+            self.live = {"state": "idle", "page": None}
+        msg = {"t": "live", "state": "idle", "reason": reason if reason in ("stopped", "cancelled", "closed") else "error"}
+        if msg["reason"] == "error":
+            msg["error"] = str(reason)[:300]
+        self.broadcast(msg)
+        self.send_state()
+        self.on_change()
+
+    def gc_images(self):
+        with self.lock:
+            keep = {f"img-{p['bg']['img']}.jpg" for p in self.doc["pages"] if p["bg"] and p["bg"].get("img")}
+        for f in self.store.glob("img-*.jpg"):
+            if f.name not in keep:
+                f.unlink(missing_ok=True)
+
+    def img_ok(self, page_id):
+        with self.lock:
+            p = self.pages.get(page_id)
+            return bool(p and p["bg"] and p["bg"].get("img") == page_id)
+
     def load_pdf(self, name, path: Path, sizes):
+        self.live_stop()
         with self.lock:
             rev = new_id()
             final = self.store / f"pdf-{rev}.pdf"
@@ -531,6 +658,7 @@ class Hub:
             self.doc = {"id": new_id(), "pages": pages, "page": 0, "pdf": {"name": clean_name(name), "rev": rev}}
             self._index()
             self.touch()
+        self.gc_images()
         self.send_state()
 
     def pdf_page_ok(self, rev, n):
@@ -701,6 +829,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"urls": self.app.pad_urls(), "version": __version__})
         if path == "/api/qr.svg":
             return self._qr()
+        if path == "/api/live/frame.jpg":
+            frame = self.app.hub.frame
+            if frame:
+                return self._send(200, frame, "image/jpeg")
+            return self._deny(404, "no live window")
+        m = re.fullmatch(r"/api/img/([A-Za-z0-9_-]{1,40})\.jpg", path)
+        if m and self.app.hub.img_ok(m.group(1)):
+            f = self.app.store / f"img-{m.group(1)}.jpg"
+            if f.exists():
+                return self._send(200, f.read_bytes(), "image/jpeg",
+                                  {"Cache-Control": "private, max-age=31536000, immutable"})
         m = re.fullmatch(r"/api/pdf/([0-9a-f]{12})/(\d{1,6})\.png", path)
         if m and self.app.hub.pdf_page_ok(m.group(1), int(m.group(2))):
             out = render_pdf_page(self.app.store, m.group(1), int(m.group(2)))
@@ -740,6 +879,18 @@ class Handler(BaseHTTPRequestHandler):
             if not self._key_ok(q):
                 return self._deny()
             return self._upload_pdf((q.get("name") or ["document.pdf"])[0])
+        if url.path == "/api/live":
+            if not self._key_ok(q):
+                return self._deny()
+            body = self._read_small_body()
+            action = body.get("action") if isinstance(body, dict) else None
+            if action == "start":
+                self.app.hub.live_start()
+            elif action == "stop":
+                self.app.hub.live_stop()
+            else:
+                return self._deny(400, "action must be start or stop")
+            return self._json({"ok": True, "live": self.app.hub.live})
         self._deny(404, "not found")
 
     def _read_small_body(self):
@@ -923,6 +1074,13 @@ class InkcastServer(ThreadingHTTPServer):
             with self._active_lock:
                 self._active -= 1
 
+    def handle_error(self, request, client_address):
+        # Clients vanishing mid-request (sleeping iPads, closed tabs) is normal.
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionError, TimeoutError, socket.timeout)):
+            return
+        sys.stderr.write(f"inkcast: request error: {exc!r}\n")
+
     def allowed_hosts(self) -> set[str]:
         now = time.monotonic()
         if now - self._hosts_at > 15:
@@ -963,7 +1121,8 @@ class InkcastServer(ThreadingHTTPServer):
         status = {"app": "inkcast", "version": __version__, "running": running, "pid": os.getpid(),
                   "port": self.port, "url": url, "qr": qr_matrix(url) if url and running else [],
                   "pads": peers["pads"] if running else 0, "views": peers["views"] if running else 0,
-                  "page": page, "pages": pages, "updated": int(time.time())}
+                  "page": page, "pages": pages, "live": self.hub.live["state"] if running else "idle",
+                  "updated": int(time.time())}
         try:
             write_private(runtime_dir() / "status.json", json.dumps(status))
         except OSError:
@@ -997,6 +1156,7 @@ class InkcastServer(ThreadingHTTPServer):
                 sys.stderr.write(f"inkcast: maintenance error: {e}\n")
 
     def server_close(self):
+        self.hub.live_stop(wait=3)
         try:
             self.hub.save_if_dirty()
             self.write_status(running=False)

@@ -40,7 +40,7 @@ Panel {
 
   readonly property bool mirroring: mirrorProc.running
   readonly property bool serverOn: pendingAction === "start" || (st.running && pendingAction !== "stop")
-  readonly property bool live: (st.running && st.pads > 0) || mirroring
+  readonly property bool live: (st.running && st.pads > 0) || mirroring || st.live === "live"
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property color urgent: bar ? bar.urgent : Color.urgent
@@ -48,17 +48,27 @@ Panel {
   readonly property color barIconColor: live ? Color.accent : (st.running ? barForeground : Qt.darker(barForeground, 1.55))
 
   // Rows the keyboard cursor walks, top to bottom.
-  readonly property var rows: st.running ? ["open", "mirror", "setup"] : ["start", "mirror", "setup"]
+  readonly property var rows: st.running ? ["open", "annotate", "mirror", "setup"] : ["start", "annotate", "mirror", "setup"]
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
-  function runCli(action) {
+  function runCli(action, extra) {
     if (actionProc.running) return
     errorText = ""
     pendingAction = action
-    actionProc.command = ["python3", root.cli, action, "--port", String(root.port)]
+    actionProc.command = ["python3", root.cli, action, "--port", String(root.port)].concat(extra || [])
     actionProc.running = true
+  }
+
+  function toggleAnnotate() {
+    if (st.live === "idle") {
+      runCli("annotate")
+      // The window picker opens on the desktop; get the popup out of its way.
+      root.close()
+    } else {
+      runCli("annotate", ["--stop"])
+    }
   }
 
   function toggleServer() {
@@ -101,6 +111,7 @@ Panel {
   function activate(name) {
     if (name === "start") toggleServer()
     else if (name === "open") openWindow()
+    else if (name === "annotate") toggleAnnotate()
     else if (name === "mirror") toggleMirror()
     else if (name === "setup") runSetup()
   }
@@ -209,6 +220,7 @@ Panel {
     function start(): void { if (!root.st.running) root.toggleServer() }
     function stop(): void { if (root.st.running) root.toggleServer() }
     function mirror(): void { root.toggleMirror() }
+    function annotate(): void { root.toggleAnnotate() }
     function status(): string { return Model.statusLine(root.st, root.mirroring) }
   }
 
@@ -258,6 +270,7 @@ Panel {
       onTextKey: function(t) {
         var k = t.toLowerCase()
         if (k === "s") root.toggleServer()
+        else if (k === "a") root.toggleAnnotate()
         else if (k === "o") root.openWindow()
         else if (k === "m") root.toggleMirror()
       }
@@ -273,6 +286,7 @@ Panel {
           title: "Inkcast"
           meta: root.pendingAction === "start" ? "Starting…"
             : root.pendingAction === "stop" ? "Stopping…"
+            : root.st.live === "live" ? "Window live"
             : Model.statusLine(root.st, root.mirroring)
           foreground: root.foreground
           fontFamily: root.fontFamily
@@ -395,6 +409,19 @@ Panel {
             ? "A clean window to share in Zoom, Teams or Meet"
             : "Then scan the QR code with your iPad"
           onActivated: root.st.running ? root.openWindow() : root.toggleServer()
+        }
+
+        ActionRow {
+          name: "annotate"
+          glyph: "󰙏"
+          title: "Annotate a window"
+          showSwitch: root.doctor.capture
+          switchOn: root.st.live !== "idle"
+          subtitle: root.st.live === "picking" ? "Choose the window in the share picker…"
+            : root.st.live === "live" ? "Live on the iPad as its own page. Select to stop"
+            : root.doctor.known && !root.doctor.capture ? "Needs GStreamer packages. Select Setup below"
+            : "Show one window on the iPad and draw over it"
+          onActivated: root.doctor.known && !root.doctor.capture ? root.runSetup() : root.toggleAnnotate()
         }
 
         PanelSeparator { foreground: root.foreground }

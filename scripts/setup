@@ -69,9 +69,14 @@ install_pkgs() {
 missing=()
 have pdftoppm && have pdfinfo || missing+=(poppler)
 have qrencode || missing+=(qrencode)
+# Desktop annotation (window capture through the screen-share portal).
+for pkg in $(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); from inkcast.capture import missing_dependencies as m; print(" ".join(m()))' "$ROOT" 2>/dev/null); do
+  missing+=("$pkg")
+done
 bold "1. Helpers"
 if ((${#missing[@]})); then
-  echo "Missing: ${missing[*]} (poppler opens PDFs, qrencode draws the pairing QR code)."
+  echo "Missing: ${missing[*]}"
+  echo "(poppler opens PDFs, qrencode draws the pairing QR code, the GStreamer/GObject packages capture windows for desktop annotation)"
   if ask "Install ${missing[*]} from the Arch repositories?"; then
     install_pkgs "${missing[@]}"
   fi

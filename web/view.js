@@ -1,4 +1,4 @@
-import { Surface, applyOp, connect, exportPDF, getKey, indexDoc, keyWorks, showLocked, uploadPDF, useTheme } from '/ink.js';
+import { Surface, applyOp, connect, exportPDF, getKey, indexDoc, keyWorks, liveNotice, showLocked, uploadPDF, useTheme } from '/ink.js';
 
 const $ = (s) => document.querySelector(s);
 const stage = $('#stage');
@@ -23,6 +23,15 @@ const MIN_ZOOM = 0.5; // relative to fit
 const MAX_ZOOM = 12;
 let fitted = true;
 let follow = true;
+let liveState = 'idle';
+
+function setLive(state) {
+  liveState = state;
+  const b = $('#b-live');
+  b.classList.toggle('on', state !== 'idle');
+  b.textContent = state === 'idle' ? 'Window' : 'Stop window';
+  b.title = state === 'idle' ? 'Annotate a desktop window (W)' : 'Stop the live window (W)';
+}
 
 const curPage = () => doc && doc.pages[doc.page];
 
@@ -33,9 +42,19 @@ const net = connect(
       $('#status').className = ok ? 'ok' : 'bad';
       $('#status').title = ok ? 'Connected' : 'Reconnecting…';
     },
+    frame(blob) {
+      surface.pushFrame(blob);
+    },
     message(msg) {
       if (msg.t === 'theme') return setTheme(msg.v);
+      if (msg.t === 'live') {
+        setLive(msg.state === 'error' ? 'idle' : msg.state);
+        const text = liveNotice(msg);
+        if (text) toast(text, msg.state === 'picking' ? 0 : 3500);
+        return;
+      }
       if (msg.t === 'state') {
+        setLive(msg.live?.state || 'idle');
         const samePage = doc && curPage()?.id === msg.doc.pages[msg.doc.page]?.id;
         doc = msg.doc;
         idx = indexDoc(doc);
@@ -274,7 +293,7 @@ async function loadInfo() {
 }
 
 function syncPair() {
-  const empty = doc && doc.pages.every((p) => !p.strokes.length) && !doc.pdf;
+  const empty = doc && doc.pages.every((p) => !p.strokes.length && !p.bg) && !doc.pdf;
   const show = pairForced ?? (pads === 0 && empty);
   $('#pair').hidden = !show;
   if (show) loadInfo();
@@ -319,6 +338,10 @@ function togglePair() {
   syncPair();
 }
 
+function toggleLive() {
+  net.send({ t: 'live', action: liveState === 'idle' ? 'start' : 'stop' });
+}
+
 function toggleFollow() {
   follow = !follow;
   $('#b-follow').classList.toggle('on', follow);
@@ -342,6 +365,7 @@ $('#b-zout').onclick = () => zoomCenter(1 / 1.25);
 $('#b-zoom').onclick = resetZoom;
 $('#b-follow').onclick = toggleFollow;
 $('#b-qr').onclick = togglePair;
+$('#b-live').onclick = toggleLive;
 $('#b-pdf').onclick = () => $('#file').click();
 $('#b-export').onclick = save;
 $('#b-full').onclick = fullscreen;
@@ -361,6 +385,7 @@ document.addEventListener('keydown', (e) => {
   else if (k === 'o') $('#file').click();
   else if (k === 's') save();
   else if (k === 'l') toggleFollow();
+  else if (k === 'w') toggleLive();
   else if (k === '0') resetZoom();
   else if (k === '+' || k === '=') zoomCenter(1.25);
   else if (k === '-' || k === '_') zoomCenter(1 / 1.25);

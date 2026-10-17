@@ -175,6 +175,31 @@ def cmd_open(args):
     open_window(local(args.port, f"/view?c={code}"))
 
 
+def cmd_annotate(args):
+    """Desktop annotation: pick a window to show on the iPad and draw on."""
+    if args.stop:
+        if not ping(args.port):
+            return
+        req = urllib.request.Request(local(args.port, "/api/live"), method="POST",
+                                     data=json.dumps({"action": "stop"}).encode(),
+                                     headers={"X-Inkcast-Key": token(), "Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=5).read()
+        return
+    from .capture import missing_dependencies
+
+    missing = missing_dependencies()
+    if missing:
+        sys.exit("Window capture needs: " + " ".join(missing) + "  (run scripts/setup)")
+    if not start_background(args):
+        sys.exit(1)
+    req = urllib.request.Request(local(args.port, "/api/live"), method="POST",
+                                 data=json.dumps({"action": "start"}).encode(),
+                                 headers={"X-Inkcast-Key": token(), "Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10).read()
+    if sys.stdout.isatty():
+        print("Pick the window in the share dialog. It appears on the iPad as a new page.")
+
+
 def cmd_board(args):
     cmd_open(args)
     if sys.stdout.isatty():
@@ -268,13 +293,17 @@ def cmd_doctor(args):
         firewall = "configured"
     else:
         firewall = "needs-setup"
+    from .capture import missing_dependencies
+
     lan = lan_addresses()
+    capture_missing = missing_dependencies() if not IS_MAC else ["(Linux only)"]
     report = {
         "version": __version__,
         "python": sys.version.split()[0],
         "poppler": bool(shutil.which("pdftoppm") and shutil.which("pdfinfo")),
         "qrencode": bool(shutil.which("qrencode")),
         "uxplay": bool(shutil.which("uxplay")),
+        "capture": not capture_missing,
         "avahi": bool(active("avahi-daemon")) if not IS_MAC else True,
         "firewall": firewall,
         "lan": lan[0] if lan else "",
@@ -287,6 +316,7 @@ def cmd_doctor(args):
     print(f"  PDF support (poppler)   {ok(report['poppler'])}")
     print(f"  QR codes (qrencode)     {ok(report['qrencode'])}")
     print(f"  AirPlay (uxplay)        {ok(report['uxplay'])}")
+    print(f"  Window capture          {'ok' if report['capture'] else 'missing ' + ' '.join(capture_missing)}")
     print(f"  Discovery (avahi)       {ok(report['avahi'])}")
     print(f"  Firewall                {report['firewall']}")
     print(f"  Network address         {report['lan'] or 'none'}")
@@ -326,6 +356,11 @@ def main(argv=None):
         sp = sub.add_parser(name, help=help_)
         common(sp)
         sp.set_defaults(fn=fn)
+
+    sp = sub.add_parser("annotate", help="show a desktop window on the iPad to draw on (opens the window picker)")
+    common(sp)
+    sp.add_argument("--stop", action="store_true", help="stop the live window (its last frame stays)")
+    sp.set_defaults(fn=cmd_annotate)
 
     sp = sub.add_parser("status", help="show whether the server is running")
     common(sp)
