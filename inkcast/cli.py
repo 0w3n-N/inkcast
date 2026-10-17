@@ -1,6 +1,7 @@
 """inkcast command line."""
 
 import argparse
+import hmac
 import ipaddress
 import json
 import os
@@ -8,6 +9,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -16,7 +18,7 @@ import urllib.request
 from pathlib import Path
 
 from . import __version__
-from .server import data_dir, private_dir, runtime_dir
+from .server import data_dir, ping_proof, private_dir, runtime_dir, write_private
 
 IS_MAC = sys.platform == "darwin"
 
@@ -66,19 +68,50 @@ def token():
         return ""
 
 
-def request(port, path, method="GET", timeout=3):
-    req = urllib.request.Request(local(port, path), method=method,
-                                 headers={"X-Inkcast-Key": token()})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+def probe(port):
+    """Who is listening on the port: "ours", "other", or None (nothing).
+
+    Any user on this computer can listen on a free port, so the server has to
+    prove it knows our key (an HMAC of a fresh challenge) before the CLI sends
+    the key to it.
+    """
+    nonce = secrets.token_hex(16)
+    try:
+        with urllib.request.urlopen(local(port, f"/api/ping?n={nonce}"), timeout=0.5) as r:
+            data = json.load(r)
+    except urllib.error.URLError as e:
+        if isinstance(e.reason, ConnectionRefusedError):
+            return None
+        return "other" if not isinstance(e.reason, (TimeoutError, socket.timeout)) else None
+    except (OSError, ValueError):
+        return "other"
+    key = token()
+    if key and isinstance(data, dict) and isinstance(data.get("proof"), str) \
+            and hmac.compare_digest(data["proof"], ping_proof(key, nonce)):
+        return "ours"
+    return "other"
 
 
 def ping(port):
-    try:
-        with urllib.request.urlopen(local(port, "/api/ping"), timeout=0.5) as r:
-            return json.load(r).get("app") == "inkcast"
-    except (OSError, ValueError):
-        return False
+    return probe(port) == "ours"
+
+
+def not_ours(port):
+    return (f"inkcast: something else is using port {port}, not your Inkcast server, so it won't be "
+            f"sent your key. Stop that program, or use another port (--port or INKCAST_PORT). "
+            f"If it's an older Inkcast still running, stop it with: pkill -f 'inkcast serve'")
+
+
+def request(port, path, method="GET", timeout=3, body=None):
+    if probe(port) != "ours":
+        sys.exit(not_ours(port))
+    headers = {"X-Inkcast-Key": token()}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(local(port, path), method=method, headers=headers,
+                                 data=json.dumps(body).encode() if body is not None else None)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
 
 
 def print_pad_urls(port):
@@ -90,8 +123,16 @@ def print_pad_urls(port):
     for u in urls:
         print(f"  {u}")
     print(flush=True)
+    print_qr(urls[0])
+
+
+def print_qr(url):
+    """Print a QR code in the terminal. The link carries the key, so it goes to
+    qrencode on stdin, never on the command line where other users can read it."""
     if shutil.which("qrencode"):
-        subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "2", urls[0]])
+        from .server import qrencode
+        sys.stdout.buffer.write(qrencode(url, "ANSIUTF8", margin=2).stdout)
+        sys.stdout.flush()
 
 
 def open_window(url):
@@ -114,8 +155,12 @@ def open_window(url):
 
 
 def start_background(args):
-    if ping(args.port):
+    state = probe(args.port)
+    if state == "ours":
         return True
+    if state == "other":
+        print(not_ours(args.port), file=sys.stderr)
+        return False
     log = log_dir() / "server.log"
     cmd = [sys.executable, "-B", "-m", "inkcast", "serve", "--port", str(args.port), "--quiet"]
     if args.host:
@@ -153,8 +198,8 @@ def cmd_serve(args):
         for u in srv.pad_urls():
             print(f"iPad: {u}")
         sys.stdout.flush()
-        if shutil.which("qrencode") and srv.pad_urls():
-            subprocess.run(["qrencode", "-t", "ANSIUTF8", "-m", "2", srv.pad_urls()[0]])
+        if srv.pad_urls():
+            print_qr(srv.pad_urls()[0])
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
@@ -172,18 +217,23 @@ def cmd_open(args):
     if not start_background(args):
         sys.exit(1)
     code = request(args.port, "/api/launch", "POST")["c"]
-    open_window(local(args.port, f"/view?c={code}"))
+    # The browser's command line is visible to other users, so it only gets the
+    # path of an owner-only page; that page passes the one-time code on in the
+    # URL fragment (#c=...), which never reaches a command line or server log.
+    # The server deletes the page once the code is used or expires.
+    from .server import launcher_path, write_private
+    target = local(args.port, f"/view#c={code}")
+    page = launcher_path(code)
+    write_private(page, '<!doctype html><meta charset="utf-8"><title>Inkcast</title>'
+                        f'<meta http-equiv="refresh" content="0;url={target}">')
+    open_window(page.as_uri())
 
 
 def cmd_annotate(args):
     """Desktop annotation: pick a window to show on the iPad and draw on."""
     if args.stop:
-        if not ping(args.port):
-            return
-        req = urllib.request.Request(local(args.port, "/api/live"), method="POST",
-                                     data=json.dumps({"action": "stop"}).encode(),
-                                     headers={"X-Inkcast-Key": token(), "Content-Type": "application/json"})
-        urllib.request.urlopen(req, timeout=5).read()
+        if ping(args.port):
+            request(args.port, "/api/live", "POST", timeout=5, body={"action": "stop"})
         return
     from .capture import missing_dependencies
 
@@ -192,10 +242,7 @@ def cmd_annotate(args):
         sys.exit("Window capture needs: " + " ".join(missing) + "  (run scripts/setup)")
     if not start_background(args):
         sys.exit(1)
-    req = urllib.request.Request(local(args.port, "/api/live"), method="POST",
-                                 data=json.dumps({"action": "start"}).encode(),
-                                 headers={"X-Inkcast-Key": token(), "Content-Type": "application/json"})
-    urllib.request.urlopen(req, timeout=10).read()
+    request(args.port, "/api/live", "POST", timeout=10, body={"action": "start"})
     if sys.stdout.isatty():
         print("Pick the window in the share dialog. It appears on the iPad as a new page.")
 
@@ -256,11 +303,15 @@ def cmd_mirror(args):
     cmd = ["uxplay", "-n", args.name, "-nh", "-p"]
     if not args.no_pin:
         # A PIN stops anyone else on the network from taking over your screen.
-        # -reg remembers devices that entered it, so they aren't asked again.
+        # It goes in an owner-only options file (-rc), not on the command line,
+        # which other users can read. -rc replaces ~/.uxplayrc, so copy that in.
+        # "reg" remembers devices that entered the PIN, so they aren't asked again.
         pin = args.pin or f"{secrets.randbelow(10000):04d}"
-        cmd += ["-pin", pin, "-reg", str(data_dir() / "airplay-devices")]
+        lines = user_uxplayrc() + [f"pin {pin}", f"reg {data_dir() / 'airplay-devices'}"]
+        rc = runtime_dir() / "uxplayrc"
+        write_private(rc, "\n".join(lines) + "\n")
+        cmd += ["-rc", str(rc)]
     # Let the bar plugin show the name and PIN (owner-only file).
-    from .server import write_private
     write_private(runtime_dir() / "mirror.json",
                   json.dumps({"name": args.name, "pin": "" if args.no_pin else pin, "pid": os.getpid()}))
     if args.fullscreen:
@@ -322,6 +373,20 @@ def cmd_doctor(args):
     print(f"  Network address         {report['lan'] or 'none'}")
     if not all([report["poppler"], report["qrencode"]]) or firewall == "needs-setup":
         print("\nRun scripts/setup to fix what's missing (it asks before each step).")
+
+
+def user_uxplayrc():
+    """Options from the user's own UxPlay startup file, if any."""
+    for f in (os.environ.get("UXPLAYRC"), "~/.uxplayrc", "~/.config/uxplayrc"):
+        if f and os.path.isfile(os.path.expanduser(f)):
+            try:
+                text = Path(os.path.expanduser(f)).read_text(errors="replace")
+            except OSError:
+                return []
+            return [ln for ln in text.splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")
+                    and ln.split()[0] not in ("pin", "pw", "reg", "rc")]
+    return []
 
 
 def pin_arg(value):

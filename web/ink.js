@@ -5,12 +5,12 @@ export const COLORS = ['#111111', '#1f5fd6', '#d62f2f', '#1d9a4b', '#e07b00', '#
 // ---------------------------------------------------------------- auth & theme
 
 // The key comes from the pairing link (?k=, the iPad) or from a one-time
-// launch code (?c=, the desktop viewer) that is swapped for the key and then
+// launch code (#c=, the desktop viewer) that is swapped for the key and then
 // removed from the address bar. The viewer keeps it in sessionStorage so a
 // reload still works; nothing is stored in cookies.
 export async function getKey() {
   const params = new URLSearchParams(location.search);
-  const code = params.get('c');
+  const code = new URLSearchParams(location.hash.slice(1)).get('c');
   if (code) {
     try {
       const r = await fetch('/api/redeem', {

@@ -123,6 +123,15 @@ def load_token(store: Path) -> str:
     return value
 
 
+def ping_proof(key: str, nonce: str) -> str:
+    return hmac.new(key.encode(), b"inkcast-ping:" + nonce.encode(), hashlib.sha256).hexdigest()
+
+
+def launcher_path(code: str) -> Path:
+    """Owner-only page that hands a one-time code to the browser (see cli.cmd_open)."""
+    return runtime_dir() / f"open-{hashlib.sha256(code.encode()).hexdigest()[:20]}.html"
+
+
 def new_id() -> str:
     return secrets.token_hex(6)
 
@@ -809,7 +818,13 @@ class Handler(BaseHTTPRequestHandler):
         path = url.path
 
         if path == "/api/ping":
-            return self._json({"app": "inkcast", "version": __version__})
+            info = {"app": "inkcast", "version": __version__}
+            # Prove we hold the key, so the CLI never hands it to some other
+            # program that took the port (see cli.probe).
+            nonce = (q.get("n") or [""])[0]
+            if re.fullmatch(r"[0-9a-f]{16,64}", nonce):
+                info["proof"] = ping_proof(self.app.token, nonce)
+            return self._json(info)
         if path in PAGES:
             return self._page(PAGES[path])
         if path in STATIC:
@@ -942,8 +957,7 @@ class Handler(BaseHTTPRequestHandler):
         url = (self.app.pad_urls() or [""])[0]
         if not url or not shutil.which("qrencode"):
             return self._deny(404, "qrencode is not installed")
-        out = subprocess.run(["qrencode", "-t", "SVG", "-m", "1", "--rle", "-o", "-", url],
-                             capture_output=True, timeout=10)
+        out = qrencode(url, "SVG", "--rle")
         self._send(200, out.stdout, "image/svg+xml")
 
     def _websocket(self, role):
@@ -1021,13 +1035,22 @@ def lan_addresses():
     return [ip for _, ip in good]
 
 
+def qrencode(text, fmt, *extra, margin=1):
+    """Run qrencode with the data on stdin.
+
+    The pairing link contains the key, and command-line arguments are visible
+    to every user on the machine (/proc/<pid>/cmdline), so it never goes there.
+    """
+    return subprocess.run(["qrencode", "-t", fmt, "-m", str(margin), *extra, "-o", "-"],
+                          input=text.encode(), capture_output=True, timeout=10)
+
+
 def qr_matrix(text):
     """QR code as rows of '0'/'1' (quiet zone included), for the bar plugin."""
     if not shutil.which("qrencode"):
         return []
     try:
-        out = subprocess.run(["qrencode", "-t", "ASCII", "-m", "2", "-o", "-", text],
-                             capture_output=True, text=True, timeout=10).stdout
+        out = qrencode(text, "ASCII", margin=2).stdout.decode()
     except (OSError, subprocess.SubprocessError):
         return []
     rows = []
@@ -1107,6 +1130,7 @@ class InkcastServer(ThreadingHTTPServer):
             return None
         with self._active_lock:
             expires = self._codes.pop(code, None)
+        launcher_path(code).unlink(missing_ok=True)
         return self.token if expires and expires > time.monotonic() else None
 
     # status file for the Omarchy bar plugin
@@ -1148,7 +1172,10 @@ class InkcastServer(ThreadingHTTPServer):
                         self._status_dirty = True
                     with self._active_lock:
                         now = time.monotonic()
+                        expired = [c for c, e in self._codes.items() if e <= now]
                         self._codes = {c: e for c, e in self._codes.items() if e > now}
+                    for c in expired:
+                        launcher_path(c).unlink(missing_ok=True)
                 if self._status_dirty or tick % 10 == 0:
                     self._status_dirty = False
                     self.write_status()

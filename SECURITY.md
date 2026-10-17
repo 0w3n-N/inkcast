@@ -45,6 +45,21 @@ your system.
   encrypted. On open or shared networks, others could read your strokes and
   the key, so don't use it there.
 
+## Other users on the same computer
+
+- Secrets are never passed as program arguments, which any user can read in
+  `/proc/<pid>/cmdline`. The QR generator reads the link from standard input.
+  The browser is given only the path of an owner-only page, which passes a
+  one-time code in the URL fragment. UxPlay reads its PIN from an owner-only
+  options file.
+- Before the CLI or the bar widget sends the key to the server, the server
+  must prove it holds the key (an HMAC of a fresh random challenge). If another
+  program is listening on the port, the CLI refuses and says so.
+- Limit: when Inkcast is off, another user could listen on its port and
+  receive the key from an iPad that opens a saved link. On a shared computer,
+  only use the iPad link while Inkcast is running, or change the port.
+  Deleting `~/.local/share/inkcast/token` issues a new key.
+
 ## Desktop annotation
 
 - Window capture goes through the standard screen-share portal. A window is

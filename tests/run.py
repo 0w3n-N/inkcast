@@ -11,6 +11,7 @@ annotation tests use GStreamer's test pattern instead of a real window.
 import base64
 import json
 import os
+import shutil
 import socket
 import stat
 import struct
@@ -426,6 +427,126 @@ else:
     write_private(srv.store / "session.json", json.dumps(doc))
     check("after a restart a live page shows its last frame",
           Hub(srv.store).doc["pages"][0]["bg"] == {"img": "pg1"})
+
+# --------------------------------------------------------------------------- impostor servers
+
+print("== the CLI only gives the key to the real server")
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: E402
+
+import inkcast.cli as cli  # noqa: E402
+from inkcast.server import ping_proof  # noqa: E402
+
+nonce = "ab" * 16
+code, _, body = http("GET", f"/api/ping?n={nonce}")
+check("server proves it holds the key", json.loads(body).get("proof") == ping_proof(KEY, nonce))
+check("no proof without a valid challenge", "proof" not in json.loads(http("GET", "/api/ping?n=zz")[2]))
+check("CLI recognizes the real server", cli.probe(PORT) == "ours")
+
+seen_headers = []
+
+
+def squatter(proof):
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            seen_headers.append(dict(self.headers))
+            out = {"app": "inkcast", "version": "9"}
+            if proof:
+                out["proof"] = proof
+            body = json.dumps(out).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        do_POST = do_GET
+
+    s = ThreadingHTTPServer(("127.0.0.1", free_port()), H)
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    return s
+
+
+for label, proof in (("no proof", None), ("a forged proof", "0" * 64)):
+    fake = squatter(proof)
+    fport = fake.server_address[1]
+    check(f"impostor with {label} is detected", cli.probe(fport) == "other")
+    try:
+        cli.request(fport, "/api/launch", "POST")
+        refused = False
+    except SystemExit:
+        refused = True
+    check(f"CLI refuses to send the key to an impostor with {label}", refused)
+    check(f"start doesn't treat an impostor with {label} as running",
+          cli.start_background(type("A", (), {"port": fport, "host": None})()) is False)
+    fake.shutdown()
+check("no key was ever sent to the impostors",
+      seen_headers and not any(KEY in json.dumps(h) for h in seen_headers), len(seen_headers))
+check("nothing listening means not running", cli.probe(free_port()) is None)
+
+# --------------------------------------------------------------------------- command lines
+
+print("== secrets stay off command lines")
+# Other users can read every process's arguments (/proc/<pid>/cmdline), so the
+# key, launch codes and the AirPlay PIN must never be passed as arguments.
+import subprocess  # noqa: E402
+
+import inkcast.cli as cli  # noqa: E402
+
+argvs = []
+real_run, real_popen = subprocess.run, subprocess.Popen
+
+
+def spy_run(cmd, *a, **kw):
+    argvs.append(list(cmd))
+    return real_run(cmd, *a, **kw)
+
+
+class SpyPopen(real_popen):
+    def __init__(self, cmd, *a, **kw):
+        argvs.append(list(cmd))
+        super().__init__(cmd, *a, **kw)
+
+
+subprocess.run, subprocess.Popen = spy_run, SpyPopen
+try:
+    http("GET", f"/api/qr.svg?k={KEY}")
+    srv.write_status()
+    import io
+    real_stdout = cli.sys.stdout
+    cli.sys.stdout = type("Quiet", (), {"buffer": io.BytesIO(), "write": lambda *a: None, "flush": lambda *a: None})()
+    cli.print_qr(srv.pad_urls()[0] if srv.pad_urls() else f"http://127.0.0.1:{PORT}/?k={KEY}")
+    opened = []
+    cli.open_window = lambda url: opened.append(url)
+    real_request = cli.request
+    cli.request = lambda port, path, method="GET", timeout=3: {"c": srv.new_launch_code()}
+    cli.cmd_open(type("A", (), {"port": PORT, "host": None})())
+    cli.request = real_request
+    mirror_cmd = []
+    if shutil.which("uxplay") and sys.platform != "darwin":
+        real_exec = os.execvp
+        os.execvp = lambda f, c: mirror_cmd.extend(c)
+        cli.cmd_mirror(type("A", (), {"name": "Test", "pin": "4826", "no_pin": False, "fullscreen": False,
+                                      "no_audio": False, "uxplay_args": []})())
+        os.execvp = real_exec
+finally:
+    subprocess.run, subprocess.Popen = real_run, real_popen
+    cli.sys.stdout = real_stdout
+qr_calls = [a for a in argvs if a and a[0] == "qrencode"]
+check("qrencode ran (status, SVG and terminal QR)", len(qr_calls) >= 3, len(qr_calls))
+check("the key never appears in a process's arguments", not any(KEY in " ".join(a) for a in argvs))
+check("the browser gets a file path, not a URL with a code",
+      len(opened) == 1 and opened[0].startswith("file://") and "c=" not in opened[0] and KEY not in opened[0], opened)
+launcher = opened[0][len("file://"):] if opened else ""
+check("launcher page is owner-only", launcher and mode(launcher) == 0o600)
+if mirror_cmd:
+    check("AirPlay PIN is not in UxPlay's arguments", "4826" not in " ".join(mirror_cmd), mirror_cmd)
+    rc = mirror_cmd[mirror_cmd.index("-rc") + 1] if "-rc" in mirror_cmd else ""
+    check("PIN goes through an owner-only UxPlay options file",
+          rc and mode(rc) == 0o600 and "pin 4826" in open(rc).read())
+else:
+    print("SKIP uxplay not installed")
 
 # --------------------------------------------------------------------------- files
 
