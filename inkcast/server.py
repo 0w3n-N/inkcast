@@ -1106,14 +1106,15 @@ def lan_addresses():
 def _posix_interfaces():
     """(interface, IPv4) pairs from `ip` (Linux) or `ifconfig` (macOS/BSD)."""
     found = []
-    try:
-        out = subprocess.run(["ip", "-j", "-4", "addr"], capture_output=True, text=True, timeout=5)
-        for iface in json.loads(out.stdout or "[]"):
-            for a in iface.get("addr_info", []):
-                found.append((iface.get("ifname", ""), a.get("local", "")))
-        return found
-    except (OSError, ValueError, subprocess.SubprocessError):
-        pass
+    if sys.platform != "darwin":  # macOS: some `ip` wrappers are slow; ifconfig is native
+        try:
+            out = subprocess.run(["ip", "-j", "-4", "addr"], capture_output=True, text=True, timeout=5)
+            for iface in json.loads(out.stdout or "[]"):
+                for a in iface.get("addr_info", []):
+                    found.append((iface.get("ifname", ""), a.get("local", "")))
+            return found
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
     try:
         out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
@@ -1174,8 +1175,7 @@ class InkcastServer(ThreadingHTTPServer):
         self._active = 0
         self._active_lock = threading.Lock()
         self._codes: dict[str, float] = {}
-        self._hosts: set[str] = set()
-        self._hosts_at = 0.0
+        self._lan = lan_addresses()  # once before listening; then every 15 s in the background
         self._status_dirty = True
         self.hub = Hub(self.store, on_change=self._mark_status)
         super().__init__((host, port), Handler)
@@ -1210,17 +1210,18 @@ class InkcastServer(ThreadingHTTPServer):
         sys.stderr.write(f"inkcast: request error: {exc!r}\n")
 
     def allowed_hosts(self) -> set[str]:
-        now = time.monotonic()
-        if now - self._hosts_at > 15:
-            names = ["127.0.0.1", "localhost", "[::1]", *lan_addresses()]
-            if self.public_host:
-                names.append(self.public_host)
-            self._hosts = {f"{n}:{self.port}".lower() for n in names}
-            self._hosts_at = now
-        return self._hosts
+        """Names this server answers to. Never runs a command: requests must not
+        wait on network enumeration (the LAN list is refreshed in the background)."""
+        names = ["127.0.0.1", "localhost", "[::1]", *self._lan]
+        if self.public_host:
+            names.append(self.public_host)
+        return {f"{n}:{self.port}".lower() for n in names}
+
+    def refresh_lan(self):
+        self._lan = lan_addresses()
 
     def pad_urls(self):
-        hosts = [self.public_host] if self.public_host else lan_addresses()
+        hosts = [self.public_host] if self.public_host else self._lan
         return [f"http://{h}:{self.port}/?k={self.token}" for h in hosts]
 
     # one-time launch codes for opening the viewer
@@ -1273,6 +1274,8 @@ class InkcastServer(ThreadingHTTPServer):
                         self.hub.broadcast({"t": "theme", "v": self.theme.version})
                 if tick % WS_PING_EVERY == 0:
                     self.hub.ping_all()
+                if tick % 15 == 0:
+                    self.refresh_lan()
                 if tick % 10 == 0:
                     url = (self.pad_urls() or [""])[0]
                     if url != last_url:

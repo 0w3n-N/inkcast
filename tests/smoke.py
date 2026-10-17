@@ -52,7 +52,8 @@ INKCAST = [sys.executable, "-B", os.path.join(ROOT, "bin", "inkcast")]
 
 def run(*args, port=True):
     extra = ["--port", str(PORT)] if port else []
-    return subprocess.run(INKCAST + list(args) + extra, capture_output=True, text=True, timeout=60, env=os.environ)
+    return subprocess.run(INKCAST + list(args) + extra, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=90, env=os.environ)
 
 
 print(f"python {sys.version.split()[0]} on {sys.platform}; data in {data_dir()}")
@@ -70,6 +71,9 @@ check("doctor reports the OS", doc.get("os") in ("linux", "macos", "windows"), d
 # the CLI starts the background server (detached process, per-OS flags)
 r = run("start")
 check("inkcast start", r.returncode == 0, r.stderr[-500:])
+if r.returncode != 0:
+    log = cli.log_dir() / "server.log"
+    print("server.log:\n" + (log.read_text(errors="replace")[-3000:] if log.exists() else "(missing)"))
 check("the server proves it holds the key", cli.probe(PORT) == "ours")
 key = (data_dir() / "token").read_text().strip()
 check("key file exists", len(key) >= 22)

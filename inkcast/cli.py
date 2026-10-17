@@ -82,7 +82,7 @@ def probe(port):
     """
     nonce = secrets.token_hex(16)
     try:
-        with urllib.request.urlopen(local(port, f"/api/ping?n={nonce}"), timeout=0.5) as r:
+        with urllib.request.urlopen(local(port, f"/api/ping?n={nonce}"), timeout=2) as r:
             data = json.load(r)
     except urllib.error.URLError as e:
         if isinstance(e.reason, ConnectionRefusedError):
